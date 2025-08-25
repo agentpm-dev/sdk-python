@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentpm"
+version = "0.0.0"
+description = "AgentPM Python SDK"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "AgentPM", email = "dev@agentpm.dev" }]
+requires-python = ">=3.10"
+keywords = ["agentpm", "ai", "tools", "agents"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Typing :: Typed"
+]
+dependencies = [
+    # runtime deps (keep lean; most SDKs need none)
+]
+
+[project.optional-dependencies]
+dev = [
+    # format/lint/type
+    "ruff>=0.6.8",
+    "black>=24.8.0",
+    "mypy>=1.11.0",
+    # tests
+    "pytest>=8.3.0",
+    "pytest-cov>=5.0.0",
+    # packaging/publish
+    "build>=1.2.1",
+    "twine>=5.1.1",
+    # hooks
+    "pre-commit>=3.8.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/agentpm-dev/sdk-python"
+Repository = "https://github.com/agentpm-dev/sdk-python/issues"
+
+# Ensure type hints are shipped
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentpm"]
+
+[tool.hatch.build]
+include = ["src/agentpm/py.typed"]
+
+# --- Ruff (linter + isort) ---
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E","F","I","B","UP","ISC","PIE","SIM","RUF"]
+ignore = [
+    "E501",  # line length handled by black
+]
+# optional: disallow print in src
+per-file-ignores = { "tests/*" = ["S101"] }
+
+# --- Black ---
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+# --- Mypy ---
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+packages = ["agentpm"]
+strict = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+# --- Pytest ---
+[tool.pytest.ini_options]
+addopts = "-q --cov=agentpm --cov-report=term-missing"
+testpaths = ["tests"]
