@@ -115,9 +115,17 @@ def load(
 ) -> dict[str, Any] | Any:
     root, manifest_path = _resolve_tool_root(spec, tool_dir_override)
     m = _read_manifest(manifest_path)
+
     ep = m["entrypoint"]
     _assert_allowed_interpreter(ep["command"])
     _assert_interpreter_available(ep["command"])
+
+    # TODO: Missing this equivalent:
+    # // enforce interpreter and runtime compatability
+    # if (manifest.runtime) {
+    # assertInterpreterMatchesRuntime(manifest.entrypoint.command, manifest.runtime);
+    # }
+
     t_s = (
         timeout
         if timeout is not None
