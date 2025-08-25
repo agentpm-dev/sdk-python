@@ -114,9 +114,10 @@ Each tool lives in a directory like:
 ```
 .agentpm/
   tools/
-    @zack/summarize@0.1.0/
-      agent.json
-      (tool files…)
+    @zack/summarize/
+      0.1.0/
+        agent.json
+        (tool files…)
 ```
 
 ---

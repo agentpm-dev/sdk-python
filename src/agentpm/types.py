@@ -14,6 +14,12 @@ class ToolMeta(TypedDict, total=False):
     description: NotRequired[str]
     inputs: NotRequired[JsonValue]
     outputs: NotRequired[JsonValue]
+    runtime: NotRequired[Runtime]
+
+
+class Runtime(TypedDict, total=False):
+    type: str
+    version: str
 
 
 class Entrypoint(TypedDict, total=False):
@@ -24,10 +30,5 @@ class Entrypoint(TypedDict, total=False):
     env: dict[str, str]
 
 
-class Manifest(TypedDict, total=False):
-    name: str
-    version: str
-    description: str
-    inputs: JsonValue
-    outputs: JsonValue
+class Manifest(ToolMeta, total=False):
     entrypoint: Entrypoint

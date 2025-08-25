@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, cast
 
-from .types import Entrypoint, JsonValue, Manifest, ToolMeta
+from .types import Entrypoint, JsonValue, Manifest, Runtime, ToolMeta
 
 DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
@@ -26,7 +26,7 @@ def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, 
     for c in candidates:
         if not c:
             continue
-        root = Path(c) / f"{name}@{version}"
+        root = Path(c) / f"{name}/{version}"
         mf = root / "agent.json"
         if mf.exists():
             return root, mf
@@ -65,6 +65,16 @@ def _assert_interpreter_available(cmd: str) -> None:
         raise FileNotFoundError(
             f'Interpreter "{cmd}" not found on PATH. Install it or adjust agent.json.entrypoint.command.'
         ) from e
+
+
+def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
+    canon = _canonical(cmd)
+    runtime_interpreter = _canonical(runtime["type"])
+
+    if canon != runtime_interpreter:
+        raise ValueError(
+            f'Misconfigured tool - agent.json.entrypoint.command "{cmd}" does not match tool runtime {runtime_interpreter}'
+        )
 
 
 def _extract_last_json(text: str) -> JsonValue:
@@ -116,15 +126,14 @@ def load(
     root, manifest_path = _resolve_tool_root(spec, tool_dir_override)
     m = _read_manifest(manifest_path)
 
+    # enforce interpreter whitelist and available
     ep = m["entrypoint"]
     _assert_allowed_interpreter(ep["command"])
     _assert_interpreter_available(ep["command"])
 
-    # TODO: Missing this equivalent:
-    # // enforce interpreter and runtime compatability
-    # if (manifest.runtime) {
-    # assertInterpreterMatchesRuntime(manifest.entrypoint.command, manifest.runtime);
-    # }
+    # enforce interpreter and runtime compatability
+    if m["runtime"] is not None:
+        _assert_interpreter_matches_runtime(ep["command"], m["runtime"])
 
     t_s = (
         timeout
@@ -154,4 +163,5 @@ def load(
             meta["outputs"] = cast(JsonValue, m["outputs"])
 
         return {"func": func, "meta": meta}
+
     return func
