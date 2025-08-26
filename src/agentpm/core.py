@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Literal, TypedDict, cast, overload
 
 from .types import Entrypoint, JsonValue, Manifest, Runtime, ToolMeta
 
@@ -120,13 +121,40 @@ def _extract_last_json(text: str) -> JsonValue:
     return json.loads(text[idx:])  # type: ignore[no-any-return]
 
 
+ToolFunc = Callable[[JsonValue], JsonValue]
+
+
+class LoadedWithMeta(TypedDict):
+    func: ToolFunc
+    meta: ToolMeta
+
+
+# --- Overloads (type-only) ---
+@overload
+def load(
+    spec: str,
+    with_meta: Literal[True],
+    timeout: float | None = ...,
+    tool_dir_override: str | None = ...,
+    env: dict[str, str] | None = ...,
+) -> LoadedWithMeta: ...
+@overload
+def load(
+    spec: str,
+    with_meta: Literal[False] = ...,
+    timeout: float | None = ...,
+    tool_dir_override: str | None = ...,
+    env: dict[str, str] | None = ...,
+) -> ToolFunc: ...
+
+
 def load(
     spec: str,
     with_meta: bool = False,
     timeout: float | None = None,
     tool_dir_override: str | None = None,
     env: dict[str, str] | None = None,
-) -> dict[str, Any] | Any:
+) -> ToolFunc | LoadedWithMeta:
     root, manifest_path = _resolve_tool_root(spec, tool_dir_override)
     m = _read_manifest(manifest_path)
 
@@ -136,7 +164,7 @@ def load(
     _assert_interpreter_available(ep["command"])
 
     # enforce interpreter and runtime compatability
-    if m["runtime"] is not None:
+    if "runtime" in m and "type" in m["runtime"]:
         _assert_interpreter_matches_runtime(ep["command"], m["runtime"])
 
     t_s = (
