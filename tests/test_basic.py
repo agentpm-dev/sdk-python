@@ -174,39 +174,42 @@ def test_with_meta_returns_func_and_meta(tmp_tools_dir: Path) -> None:
     assert out.get("summary") == "ABC"
 
 
-# @pytest.mark.skipif(pytest.importorskip("langchain_core", reason="langchain_core not installed") is None, reason="langchain_core missing")
-# def test_to_langchain_tool_adapter(tmp_tools_dir: Path):
-#     # Lazy import (agentpm.__getattr__) will load the adapter only when accessed
-#     from agentpm import to_langchain_tool  # type: ignore
-#
-#     ok_spec = "@zack/summarize@0.1.0"
-#     _write_tool_package(tmp_tools_dir, ok_spec, command="python", script_file="tool.py")
-#
-#     loaded = load(ok_spec, with_meta=True, tool_dir_override=str(tmp_tools_dir))
-#     tool = to_langchain_tool(loaded)  # should produce a tool-like object
-#
-#     # Name/description checks (best-effort, since adapter shape may vary)
-#     assert hasattr(tool, "name")
-#     assert hasattr(tool, "description")
-#     assert isinstance(tool.name, str)
-#     assert "Inputs:" in tool.description
-#     assert "Outputs:" in tool.description
-#
-#     # Try common call patterns
-#     if hasattr(tool, "invoke"):
-#         r = tool.invoke({"text": "mixed Case"})
-#         assert isinstance(r, str)
-#         assert r == "MIXED CASE"
-#     elif hasattr(tool, "func"):
-#         r = tool.func({"text": "mixed Case"})  # type: ignore[attr-defined]
-#         assert isinstance(r, str)
-#         assert r == "MIXED CASE"
-#     elif callable(tool):
-#         r = tool({"text": "mixed Case"})
-#         assert isinstance(r, str)
-#         assert r == "MIXED CASE"
-#     else:
-#         pytest.skip("Adapter returned an unsupported tool shape")
+@pytest.mark.skipif(  # type: ignore[misc]  # pytest decorator is untyped
+    pytest.importorskip("langchain_core", reason="langchain_core not installed") is None,
+    reason="langchain_core missing",
+)
+def test_to_langchain_tool_adapter(tmp_tools_dir: Path) -> None:
+    # Lazy import (agentpm.__getattr__) will load the adapter only when accessed
+    from agentpm import to_langchain_tool
+
+    ok_spec = "@zack/summarize@0.1.0"
+    _write_tool_package(tmp_tools_dir, ok_spec, command="python", script_file="tool.py")
+
+    loaded = load(ok_spec, with_meta=True, tool_dir_override=str(tmp_tools_dir))
+    tool = to_langchain_tool(loaded)  # should produce a tool-like object
+
+    # Name/description checks (best-effort, since adapter shape may vary)
+    assert hasattr(tool, "name")
+    assert hasattr(tool, "description")
+    assert isinstance(tool.name, str)
+    assert "Inputs:" in tool.description
+    assert "Outputs:" in tool.description
+
+    # Try common call patterns
+    if hasattr(tool, "invoke"):
+        r = tool.invoke({"text": "mixed Case"})
+        assert isinstance(r, str)
+        assert r == "MIXED CASE"
+    elif hasattr(tool, "func"):
+        r = tool.func({"text": "mixed Case"})
+        assert isinstance(r, str)
+        assert r == "MIXED CASE"
+    elif callable(tool):
+        r = tool({"text": "mixed Case"})
+        assert isinstance(r, str)
+        assert r == "MIXED CASE"
+    else:
+        pytest.skip("Adapter returned an unsupported tool shape")
 
 
 def test_nonzero_exit_raises(tmp_tools_dir: Path) -> None:

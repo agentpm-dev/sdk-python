@@ -39,6 +39,7 @@ dev = [
     # hooks
     "pre-commit>=3.8.0"
 ]
+langchain = [ "langchain-core>=0.2.0" ]
 
 [project.urls]
 Homepage = "https://github.com/agentpm-dev/sdk-python"
