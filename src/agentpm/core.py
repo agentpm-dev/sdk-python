@@ -12,16 +12,55 @@ DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
 
 
+def _canonical(cmd: str) -> str:
+    # handle absolute paths and Windows extensions
+    base = os.path.basename(cmd).lower()
+    for ext in (".exe", ".cmd", ".bat"):
+        if base.endswith(ext):
+            return base[: -len(ext)]
+    return base
+
+
+def _assert_allowed_interpreter(cmd: str) -> None:
+    if _canonical(cmd) not in _ALLOWED:
+        raise ValueError(
+            f'Unsupported agent.json.entrypoint.command "{cmd}". Allowed: node|nodejs|python|python3'
+        )
+
+
+# verify the interpreter exists on PATH
+def _assert_interpreter_available(cmd: str) -> None:
+    try:
+        subprocess.run(
+            [cmd, "--version"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f'Interpreter "{cmd}" not found on PATH. Install it to load tool.'
+        ) from e
+
+
+def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
+    canon = _canonical(cmd)
+    runtime_interpreter = _canonical(runtime["type"])
+
+    if canon != runtime_interpreter:
+        raise ValueError(
+            f'Misconfigured tool - agent.json.entrypoint.command "{cmd}" does not match tool runtime {runtime_interpreter}'
+        )
+
+
 def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, Path]:
+    # spec form: "@scope/name@1.2.3"
     at = spec.rfind("@")
     if at <= 0 or at == len(spec) - 1:
         raise ValueError(f'Invalid tool spec "{spec}". Expected "@scope/name@version".')
     version, name = spec[at + 1 :], spec[:at]
     candidates = [
         tool_dir_override,
-        os.getenv("AGENTPM_TOOL_DIR"),
-        Path.cwd() / ".agentpm" / "tools",
-        Path.home() / ".agentpm" / "tools",
+        os.getenv("AGENTPM_TOOL_DIR"),  # optional override
+        Path.cwd() / ".agentpm" / "tools",  # project-local (preferred)
+        Path.home() / ".agentpm" / "tools",  # fallback
     ]
     for c in candidates:
         if not c:
@@ -39,49 +78,6 @@ def _read_manifest(p: Path) -> Manifest:
     if not ep or not ep.get("command"):
         raise ValueError(f"agent.json missing entrypoint.command at: {p}")
     return m  # type: ignore[no-any-return]
-
-
-def _canonical(cmd: str) -> str:
-    base = os.path.basename(cmd).lower()
-    for ext in (".exe", ".cmd", ".bat"):
-        if base.endswith(ext):
-            return base[: -len(ext)]
-    return base
-
-
-def _assert_allowed_interpreter(cmd: str) -> None:
-    if _canonical(cmd) not in _ALLOWED:
-        raise ValueError(
-            f'Unsupported agent.json.entrypoint.command "{cmd}". Allowed: node|nodejs|python|python3'
-        )
-
-
-def _assert_interpreter_available(cmd: str) -> None:
-    try:
-        subprocess.run(
-            [cmd, "--version"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except FileNotFoundError as e:
-        raise FileNotFoundError(
-            f'Interpreter "{cmd}" not found on PATH. Install it or adjust agent.json.entrypoint.command.'
-        ) from e
-
-
-def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
-    canon = _canonical(cmd)
-    runtime_interpreter = _canonical(runtime["type"])
-
-    if canon != runtime_interpreter:
-        raise ValueError(
-            f'Misconfigured tool - agent.json.entrypoint.command "{cmd}" does not match tool runtime {runtime_interpreter}'
-        )
-
-
-def _extract_last_json(text: str) -> JsonValue:
-    idx = text.rfind("{")
-    if idx < 0:
-        raise RuntimeError("No JSON object found on stdout.")
-    return json.loads(text[idx:])  # type: ignore[no-any-return]
 
 
 def _spawn_once(
@@ -114,6 +110,14 @@ def _spawn_once(
         raise RuntimeError(
             f"Failed to parse tool JSON output.\nStderr:\n{stderr}\nStdout:\n{stdout}\nReason: {e}"
         ) from e
+
+
+def _extract_last_json(text: str) -> JsonValue:
+    # naive but effective: scan for last '{' and try parse json from there.
+    idx = text.rfind("{")
+    if idx < 0:
+        raise RuntimeError("No JSON object found on stdout.")
+    return json.loads(text[idx:])  # type: ignore[no-any-return]
 
 
 def load(
