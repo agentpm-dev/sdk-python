@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import resource
+import shutil
 import subprocess
+import sys
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, cast, overload
 
@@ -90,36 +95,109 @@ def _read_manifest(p: Path) -> Manifest:
     return m  # type: ignore[no-any-return]
 
 
+def _build_env(
+    entry_env: dict[str, str], caller_env: dict[str, str], home: str, tmpdir: str
+) -> dict[str, str]:
+    base = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": home,
+        "TMPDIR": tmpdir,
+    }
+    # Optional: preserve locale if present
+    for k in ("LANG", "LC_ALL"):
+        if k in os.environ:
+            base[k] = os.environ[k]
+    # Agent-provided env wins, then caller overrides
+    return {**base, **entry_env, **caller_env}
+
+
+IS_POSIX = os.name == "posix"
+IS_DARWIN = sys.platform == "darwin"
+
+
+def _preexec_rlimits(
+    *,
+    max_cpu_s: int | None = 10,
+    max_files: int | None = 256,
+    max_addr_mb: int | None = 512,
+) -> Callable[[], None]:
+    def _fn() -> None:
+        if max_cpu_s is not None and hasattr(resource, "RLIMIT_CPU"):
+            resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_s, max_cpu_s))
+        if max_files is not None and hasattr(resource, "RLIMIT_NOFILE"):
+            resource.setrlimit(resource.RLIMIT_NOFILE, (max_files, max_files))
+        # RLIMIT_AS is fragile on macOS; skip there
+        if max_addr_mb is not None and not IS_DARWIN and hasattr(resource, "RLIMIT_AS"):
+            limit = max_addr_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+    return _fn
+
+
 def _spawn_once(
     root: Path, entry: Entrypoint, payload: JsonValue, timeout_s: float, env: dict[str, str]
 ) -> JsonValue:
-    cwd = (root / entry.get("cwd", ".")).resolve()
-    args = entry.get("args", [])
-    cmd = [entry["command"], *args]
+    # 1) Tool working dir (what the tool expects for relative paths)
+    tool_cwd = (root / entry.get("cwd", ".")).resolve()
+
+    # 2) Isolated run dirs for HOME/TMPDIR
+    run_root: Path = tool_cwd / "run"
+    run_root.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="run-", dir=str(run_root)))
+    home = str(work / "home")
+    Path(home).mkdir(parents=True, exist_ok=True)
+    tmpd = str(work / "tmp")
+    Path(tmpd).mkdir(parents=True, exist_ok=True)
+
+    # 3) Command + hardening flags
+    cmd = [entry["command"], *entry.get("args", [])]
+    if entry["command"].startswith("python"):
+        if "-I" not in cmd:
+            cmd.insert(1, "-I")
+        if "-B" not in cmd:
+            cmd.insert(1, "-B")
+    elif entry["command"].startswith("node"):
+        if not any(a.startswith("--max-old-space-size") for a in cmd):
+            cmd.insert(1, "--max-old-space-size=256")
+
+    # 4) Clean env
+    env = _build_env(entry.get("env", {}), env, home, tmpd)
+
+    # 5) Spawn (cwd = tool_cwd)
     proc = subprocess.Popen(
         cmd,
-        cwd=str(cwd),
-        env={**os.environ, **entry.get("env", {}), **env},
+        cwd=str(tool_cwd),
+        env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
+        preexec_fn=_preexec_rlimits() if hasattr(resource, "setrlimit") else None,
     )
     try:
         stdout, stderr = proc.communicate(input=json.dumps(payload), timeout=timeout_s)
     except subprocess.TimeoutExpired as e:
         proc.kill()
         raise TimeoutError(f"Tool timed out after {timeout_s:.1f}s") from e
+
+    # Cap outputs (10MB)
+    max_bytes = 10 * 1024 * 1024
+    if len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) > max_bytes:
+        raise RuntimeError("Tool produced too much output; limit is 10MB")
+
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"Tool exited with code {proc.returncode}. Stderr:\n{stderr or '(empty)'}"
-        )
+        tail = stderr[-4000:] if stderr else ""
+        raise RuntimeError(f"Tool exited with code {proc.returncode}. Stderr (tail):\n{tail}")
+
     try:
         return _extract_last_json(stdout)
     except Exception as e:
         raise RuntimeError(
             f"Failed to parse tool JSON output.\nStderr:\n{stderr}\nStdout:\n{stdout}\nReason: {e}"
         ) from e
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _extract_last_json(text: str) -> JsonValue:
