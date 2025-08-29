@@ -44,10 +44,20 @@ def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
     canon = _canonical(cmd)
     runtime_interpreter = _canonical(runtime["type"])
 
-    if canon != runtime_interpreter:
+    if not is_interpreter_match(runtime_interpreter, canon):
         raise ValueError(
             f'Misconfigured tool - agent.json.entrypoint.command "{cmd}" does not match tool runtime {runtime_interpreter}'
         )
+
+
+def is_interpreter_match(runtime: str, command: str) -> bool:
+    if runtime == command:
+        return True
+
+    # runtime -> acceptable command aliases
+    aliases = {"python": ["python3"], "node": ["nodejs"]}
+
+    return command in aliases.get(runtime, [])
 
 
 def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, Path]:
