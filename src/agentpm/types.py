@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TypedDict
 
 from typing_extensions import NotRequired, Required
@@ -32,3 +33,11 @@ class Entrypoint(TypedDict, total=False):
 
 class Manifest(ToolMeta, total=False):
     entrypoint: Entrypoint
+
+
+ToolFunc = Callable[[JsonValue], JsonValue]
+
+
+class LoadedWithMeta(TypedDict):
+    func: ToolFunc
+    meta: ToolMeta

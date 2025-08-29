@@ -3,35 +3,9 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TypedDict, TypeGuard, cast
+from typing import TypedDict, TypeGuard
 
-from ..types import JsonValue, ToolMeta
-
-
-def _as_tool_meta(meta_obj: object) -> ToolMeta:
-    meta: ToolMeta = {"name": "agentpm_tool", "version": "0.0.0"}
-    if isinstance(meta_obj, dict):
-        name = meta_obj.get("name")
-        if isinstance(name, str) and name:
-            meta["name"] = name
-
-        version = meta_obj.get("version")
-        if isinstance(version, str) and version:
-            meta["version"] = version
-
-        desc = meta_obj.get("description")
-        if isinstance(desc, str):
-            meta["description"] = desc
-
-        inputs = meta_obj.get("inputs")
-        if inputs is not None:
-            meta["inputs"] = cast(JsonValue, inputs)
-
-        outputs = meta_obj.get("outputs")
-        if outputs is not None:
-            meta["outputs"] = cast(JsonValue, outputs)
-    return meta
-
+from ..types import JsonValue, LoadedWithMeta, ToolFunc, ToolMeta
 
 # ---------- JSON Schema typing & guards ----------
 
@@ -102,14 +76,14 @@ class _AdapterTool:
 
 
 def to_langchain_tool(
-    loaded: Mapping[str, object],
+    loaded: LoadedWithMeta,
     *,
     name: str | None = None,
     description: str | None = None,
     result_to_string: Callable[[JsonValue], str] | None = None,
     force_simple: bool = False,
 ) -> _AdapterTool:
-    # Enforce optional dependency presence (DX parity with Node)
+    # Enforce optional dependency presence
     try:
         import langchain_core.tools as _  # noqa: F401
     except Exception as e:  # pragma: no cover
@@ -117,17 +91,15 @@ def to_langchain_tool(
             "to_langchain_tool() requires langchain-core. Install with: pip install 'agentpm[langchain]'"
         ) from e
 
-    func_obj = loaded.get("func")
-    meta_obj = loaded.get("meta")
+    tool_func: ToolFunc = loaded["func"]
+    meta: ToolMeta = loaded["meta"]
 
-    if not callable(func_obj):
+    if not callable(tool_func):
         raise TypeError("loaded['func'] must be callable")
 
-    tool_func: Callable[[JsonValue], JsonValue] = func_obj
-    meta: ToolMeta = _as_tool_meta(meta_obj)
+    tool_name: str = name or (meta.get("name") or "agentpm_tool")
+    desc_base: str = description or (meta.get("description") or "")
 
-    tool_name = name or meta.get("name") or "agentpm_tool"
-    desc_base = description or meta.get("description") or ""
     rich_desc = desc_base
     if "inputs" in meta:
         rich_desc += f" Inputs: {json.dumps(meta['inputs'])}."

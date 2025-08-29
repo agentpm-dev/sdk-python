@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, TypedDict, cast, overload
+from typing import Literal, cast, overload
 
-from .types import Entrypoint, JsonValue, Manifest, Runtime, ToolMeta
+from .types import Entrypoint, JsonValue, LoadedWithMeta, Manifest, Runtime, ToolFunc, ToolMeta
 
 DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
@@ -119,14 +118,6 @@ def _extract_last_json(text: str) -> JsonValue:
     if idx < 0:
         raise RuntimeError("No JSON object found on stdout.")
     return json.loads(text[idx:])  # type: ignore[no-any-return]
-
-
-ToolFunc = Callable[[JsonValue], JsonValue]
-
-
-class LoadedWithMeta(TypedDict):
-    func: ToolFunc
-    meta: ToolMeta
 
 
 # --- Overloads (type-only) ---
