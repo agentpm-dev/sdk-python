@@ -21,6 +21,32 @@ DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
 
 
+def _debug_enabled() -> bool:
+    val = os.getenv("AGENTPM_DEBUG", "")
+    return val not in ("", "0", "false", "False", "no")
+
+
+def _dprint(msg: str) -> None:
+    if _debug_enabled():
+        sys.stderr.write(f"[agentpm-debug] {msg}\n")
+
+
+def _abbrev(s: str, n: int = 240) -> str:
+    return s if len(s) <= n else (s[:n] + "…")
+
+
+def _merge_env(
+    entry_env: dict[str, str] | None,
+    caller_env: dict[str, str] | None,
+) -> dict[str, str]:
+    merged = os.environ.copy()
+    if entry_env:
+        merged.update(entry_env)
+    if caller_env:
+        merged.update(caller_env)
+    return merged
+
+
 def _canonical(cmd: str) -> str:
     # handle absolute paths and Windows extensions
     base = os.path.basename(cmd).lower()
@@ -38,15 +64,19 @@ def _assert_allowed_interpreter(cmd: str) -> None:
 
 
 # verify the interpreter exists on PATH
-def _assert_interpreter_available(cmd: str) -> None:
-    try:
-        subprocess.run(
-            [cmd, "--version"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except FileNotFoundError as e:
+def _assert_interpreter_available(
+    cmd: str, entry_env: dict[str, str] | None, caller_env: dict[str, str] | None
+) -> None:
+    merged = _merge_env(entry_env, caller_env)
+
+    which = shutil.which(cmd, path=merged.get("PATH", ""))
+    _dprint(f'interpreter="{cmd}" which={which or "<not found>"}')
+    _dprint(f'MERGED PATH={_abbrev(merged.get("PATH",""))}')
+
+    if which is None:
         raise FileNotFoundError(
-            f'Interpreter "{cmd}" not found on PATH. Install it to load tool.'
-        ) from e
+            f'Interpreter "{cmd}" not found on PATH.\nChecked PATH={merged.get("PATH","")}'
+        )
 
 
 def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
@@ -70,31 +100,92 @@ def is_interpreter_match(runtime: str, command: str) -> bool:
 
 
 def _list_installed_versions(base: Path, name: str) -> list[str]:
-    """Return all installed x.y.z versions for a tool name."""
-    out: set[str] = set()
+    """Return all installed x.y.z versions for a tool name, searching all name dir variants."""
+    seen: set[str] = set()
 
-    nested = base / name
-    if nested.is_dir():
-        for p in nested.iterdir():
-            if p.is_dir():
-                v = p.name
-                try:
-                    VersionInfo.parse(v)
-                except ValueError:
-                    continue
-                if (p / "agent.json").exists():
-                    out.add(v)
+    for name_dir in candidate_name_dirs(str(base), name):
+        root = Path(name_dir)
+        if not root.is_dir():
+            continue
+
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+
+            v = child.name
+            try:
+                # validate semver
+                VersionInfo.parse(v)
+            except ValueError:
+                continue
+
+            if (child / "agent.json").exists():
+                seen.add(v)
 
     # highest first
-    return sorted(out, key=VersionInfo.parse, reverse=True)
+    return sorted(seen, key=VersionInfo.parse, reverse=True)
+
+
+def candidate_name_dirs(base: str, name: str) -> list[str]:
+    """
+    Supports names like "@scope/name" or "scope/name".
+    Tries:
+      base/@scope/name, base/scope/name, base/scope__name, base/scope-name
+    Falls back to base/name for unscoped.
+    """
+    parts = name.split("/")
+
+    if len(parts) == 2:
+        raw_scope, pkg = parts
+        scope = raw_scope[1:] if raw_scope.startswith("@") else raw_scope
+        return [
+            os.path.join(base, f"@{scope}", pkg),  # with '@'
+            os.path.join(base, scope, pkg),  # without '@'
+            os.path.join(base, f"{scope}__{pkg}"),
+            os.path.join(base, f"{scope}-{pkg}"),
+        ]
+
+    # Unscoped package
+    return [os.path.join(base, name)]
 
 
 def _find_installed(base: Path, name: str, version: str) -> tuple[Path, Path] | None:
-    """Return (root, manifest_path) if this exact version exists."""
-    nested_manifest = base / name / version / "agent.json"
-    if nested_manifest.exists():
-        return nested_manifest.parent, nested_manifest
+    """Return (root, manifest_path) if this exact version exists, searching all name dir variants."""
+    for name_dir in candidate_name_dirs(str(base), name):
+        root = Path(name_dir) / version
+        manifest = root / "agent.json"
+        if manifest.exists():
+            return root, manifest
     return None
+
+
+def find_project_root(start_dir: str | Path) -> Path:
+    """
+    Walk up from start_dir looking for project markers.
+    Priority: agent.json, package.json, pnpm-workspace.yaml, turbo.json, lerna.json, .git
+    Returns the resolved start_dir if nothing is found.
+    """
+    dir_path = Path(start_dir).resolve()
+    while True:
+        if (dir_path / "agent.json").exists():
+            return dir_path
+        if (dir_path / "package.json").exists():
+            return dir_path
+        if (dir_path / "pnpm-workspace.yaml").exists():
+            return dir_path
+        if (dir_path / "turbo.json").exists():
+            return dir_path
+        if (dir_path / "lerna.json").exists():
+            return dir_path
+        if (dir_path / ".git").exists():
+            return dir_path
+
+        parent = dir_path.parent
+        if parent == dir_path:  # reached filesystem root
+            break
+        dir_path = parent
+
+    return Path(start_dir).resolve()
 
 
 def _normalize_selector(selector: str) -> str:
@@ -150,17 +241,28 @@ def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, 
     at = spec.rfind("@")
     if at <= 0 or at == len(spec) - 1:
         raise ValueError(f'Invalid tool spec "{spec}". Expected "@scope/name@version".')
-    selector, name = spec[at + 1 :].strip(), spec[:at]
+
+    selector = spec[at + 1 :].strip()
+
+    raw_name = spec[:at]
+    name = raw_name[1:] if raw_name.startswith("@") else raw_name  # drop leading '@' if present
+
+    project_root = find_project_root(Path.cwd())
+    _dprint(f"project_root={project_root}")
 
     # candidate search roots (project first)
     candidates: list[Path] = []
     if tool_dir_override:
         candidates.append(Path(tool_dir_override))
+
     env_dir = os.getenv("AGENTPM_TOOL_DIR")
     if env_dir:
         candidates.append(Path(env_dir))
-    candidates.append(Path.cwd() / ".agentpm" / "tools")
+
+    candidates.append(project_root / ".agentpm" / "tools")
     candidates.append(Path.home() / ".agentpm" / "tools")
+
+    _dprint("candidates:\n  " + "\n  ".join(str(c) for c in candidates))
 
     # 1) Exact version fast path
     try:
@@ -355,13 +457,22 @@ def load(
     tool_dir_override: str | None = None,
     env: dict[str, str] | None = None,
 ) -> ToolFunc | LoadedWithMeta:
+    _dprint(f"spec={spec}")
+
     root, manifest_path = _resolve_tool_root(spec, tool_dir_override)
     m = _read_manifest(manifest_path)
 
+    env = env or {}
+
     # enforce interpreter whitelist and available
     ep = m["entrypoint"]
+
+    _dprint(f"resolved root={root}")
+    _dprint(f"manifest={manifest_path}")
+    _dprint(f'entry.command="{ep["command"]}" args={ep.get("args", [])}')
+
     _assert_allowed_interpreter(ep["command"])
-    _assert_interpreter_available(ep["command"])
+    _assert_interpreter_available(ep["command"], ep.get("env", {}), env)
 
     # enforce interpreter and runtime compatability
     if "runtime" in m and "type" in m["runtime"]:
@@ -372,7 +483,6 @@ def load(
         if timeout is not None
         else float(ep.get("timeout_ms") or (DEFAULT_TIMEOUT * 1000)) / 1000.0
     )
-    env = env or {}
 
     def func(input: JsonValue) -> JsonValue:
         return _spawn_once(root, ep, input, t_s, env)
