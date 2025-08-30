@@ -21,7 +21,8 @@ classifiers = [
     "Typing :: Typed"
 ]
 dependencies = [
-    # runtime deps (keep lean; most SDKs need none)
+    # runtime deps
+    "semver>=3.0.0"
 ]
 
 [project.optional-dependencies]
