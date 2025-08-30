@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import resource
 import shutil
 import subprocess
@@ -10,6 +11,9 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, cast, overload
+
+from semver import VersionInfo
+from semver import match as semver_match
 
 from .types import Entrypoint, JsonValue, LoadedWithMeta, Manifest, Runtime, ToolFunc, ToolMeta
 
@@ -65,26 +69,143 @@ def is_interpreter_match(runtime: str, command: str) -> bool:
     return command in aliases.get(runtime, [])
 
 
+def _list_installed_versions(base: Path, name: str) -> list[str]:
+    """Return all installed x.y.z versions for a tool name."""
+    out: set[str] = set()
+
+    nested = base / name
+    if nested.is_dir():
+        for p in nested.iterdir():
+            if p.is_dir():
+                v = p.name
+                try:
+                    VersionInfo.parse(v)
+                except ValueError:
+                    continue
+                if (p / "agent.json").exists():
+                    out.add(v)
+
+    # highest first
+    return sorted(out, key=VersionInfo.parse, reverse=True)
+
+
+def _find_installed(base: Path, name: str, version: str) -> tuple[Path, Path] | None:
+    """Return (root, manifest_path) if this exact version exists."""
+    nested_manifest = base / name / version / "agent.json"
+    if nested_manifest.exists():
+        return nested_manifest.parent, nested_manifest
+    return None
+
+
+def _normalize_selector(selector: str) -> str:
+    s = selector.strip()
+    if not s or s.lower() == "latest":
+        return ""
+
+    def parts(ver: str) -> tuple[int, int, int, int]:
+        xs = [p for p in ver.strip().split(".") if p != ""]
+        n = len(xs)
+        maj = int(xs[0]) if n >= 1 else 0
+        min_ = int(xs[1]) if n >= 2 else 0
+        pat = int(xs[2]) if n >= 3 else 0
+        return maj, min_, pat, n
+
+    if s[0] in ("^", "~"):
+        op, base = s[0], s[1:].strip()
+        maj, min_, pat, n = parts(base)
+        lower = f">={maj}.{min_}.{pat}"
+        if op == "^":
+            if maj > 0:
+                upper = f"<{maj+1}.0.0"
+            elif n == 1:
+                upper = "<1.0.0"  # ^0
+            elif min_ > 0:
+                upper = f"<0.{min_+1}.0"  # ^0.y
+            else:
+                upper = f"<0.0.{pat+1}"  # ^0.0.z
+        else:  # '~'
+            upper = f"<{maj + 1}.0.0" if n == 1 else f"<{maj}.{min_ + 1}.0"
+        # return space-separated; we'll split on spaces/commas later
+        return f"{lower} {upper}"
+
+    # Comparator set like ">=0.1.1 <0.2.0" (or commas) → normalize whitespace
+    tokens = [t for t in s.replace(",", " ").split() if t]
+    return " ".join(tokens)
+
+
+def _version_satisfies(ver: str, selector: str) -> bool:
+    expr = _normalize_selector(selector)
+    if not expr:  # empty / "latest"
+        return True
+    # Split on spaces or commas
+    tokens = [t for t in re.split(r"[,\s]+", expr) if t]
+    try:
+        return all(semver_match(ver, tok) for tok in tokens)
+    except ValueError:
+        return False
+
+
 def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, Path]:
-    # spec form: "@scope/name@1.2.3"
+    # spec form: @scope/name@<version or range or 'latest'>
     at = spec.rfind("@")
     if at <= 0 or at == len(spec) - 1:
         raise ValueError(f'Invalid tool spec "{spec}". Expected "@scope/name@version".')
-    version, name = spec[at + 1 :], spec[:at]
-    candidates = [
-        tool_dir_override,
-        os.getenv("AGENTPM_TOOL_DIR"),  # optional override
-        Path.cwd() / ".agentpm" / "tools",  # project-local (preferred)
-        Path.home() / ".agentpm" / "tools",  # fallback
-    ]
-    for c in candidates:
-        if not c:
+    selector, name = spec[at + 1 :].strip(), spec[:at]
+
+    # candidate search roots (project first)
+    candidates: list[Path] = []
+    if tool_dir_override:
+        candidates.append(Path(tool_dir_override))
+    env_dir = os.getenv("AGENTPM_TOOL_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(Path.cwd() / ".agentpm" / "tools")
+    candidates.append(Path.home() / ".agentpm" / "tools")
+
+    # 1) Exact version fast path
+    try:
+        if selector and selector.lower() != "latest":
+            VersionInfo.parse(selector)  # raises if not exact x.y.z
+            for base in candidates:
+                hit = _find_installed(base, name, selector)
+                if hit:
+                    return hit
+            raise FileNotFoundError(f'Tool "{spec}" not found in .agentpm/tools (or overrides).')
+    except ValueError:
+        # not an exact version → fall through to range/latest
+        pass
+
+    # 2) Range or "latest" (or empty after "@")
+    want_latest = (not selector) or (selector.lower() == "latest")
+
+    for base in candidates:
+        installed = _list_installed_versions(base, name)
+        if not installed:
             continue
-        root = Path(c) / f"{name}/{version}"
-        mf = root / "agent.json"
-        if mf.exists():
-            return root, mf
-    raise FileNotFoundError(f'Tool "{spec}" not found in .agentpm/tools (or overrides).')
+
+        if want_latest:
+            picked = installed[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+            continue
+
+        # Filter by range using semver.match, then pick highest
+        satisfying: list[str] = []
+        for v in installed:
+            if _version_satisfies(v, selector):
+                satisfying.append(v)
+
+        if satisfying:
+            picked = sorted(satisfying, key=VersionInfo.parse, reverse=True)[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f'No installed version of "{name}" matches "{selector or "latest"}". Searched: {searched}'
+    )
 
 
 def _read_manifest(p: Path) -> Manifest:
