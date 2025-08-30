@@ -21,6 +21,32 @@ DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
 
 
+def _debug_enabled() -> bool:
+    val = os.getenv("AGENTPM_DEBUG", "")
+    return val not in ("", "0", "false", "False", "no")
+
+
+def _dprint(msg: str) -> None:
+    if _debug_enabled():
+        sys.stderr.write(f"[agentpm-debug] {msg}\n")
+
+
+def _abbrev(s: str, n: int = 240) -> str:
+    return s if len(s) <= n else (s[:n] + "…")
+
+
+def _merge_env(
+    entry_env: dict[str, str] | None,
+    caller_env: dict[str, str] | None,
+) -> dict[str, str]:
+    merged = os.environ.copy()
+    if entry_env:
+        merged.update(entry_env)
+    if caller_env:
+        merged.update(caller_env)
+    return merged
+
+
 def _canonical(cmd: str) -> str:
     # handle absolute paths and Windows extensions
     base = os.path.basename(cmd).lower()
@@ -41,16 +67,15 @@ def _assert_allowed_interpreter(cmd: str) -> None:
 def _assert_interpreter_available(
     cmd: str, entry_env: dict[str, str] | None, caller_env: dict[str, str] | None
 ) -> None:
-    merged = os.environ.copy()
-    if entry_env:
-        merged.update(entry_env)
-    if caller_env:
-        merged.update(caller_env)
+    merged = _merge_env(entry_env, caller_env)
 
-    if shutil.which(cmd, path=merged.get("PATH", "")) is None:
+    which = shutil.which(cmd, path=merged.get("PATH", ""))
+    _dprint(f'interpreter="{cmd}" which={which or "<not found>"}')
+    _dprint(f'MERGED PATH={_abbrev(merged.get("PATH",""))}')
+
+    if which is None:
         raise FileNotFoundError(
-            f'Interpreter "{cmd}" not found on PATH. '
-            'Install it, or pass PATH via load(..., env={"PATH": os.environ["PATH"]}).'
+            f'Interpreter "{cmd}" not found on PATH.\nChecked PATH={merged.get("PATH","")}'
         )
 
 
@@ -223,6 +248,7 @@ def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, 
     name = raw_name[1:] if raw_name.startswith("@") else raw_name  # drop leading '@' if present
 
     project_root = find_project_root(Path.cwd())
+    _dprint(f"project_root={project_root}")
 
     # candidate search roots (project first)
     candidates: list[Path] = []
@@ -235,6 +261,8 @@ def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, 
 
     candidates.append(project_root / ".agentpm" / "tools")
     candidates.append(Path.home() / ".agentpm" / "tools")
+
+    _dprint("candidates:\n  " + "\n  ".join(str(c) for c in candidates))
 
     # 1) Exact version fast path
     try:
@@ -429,6 +457,8 @@ def load(
     tool_dir_override: str | None = None,
     env: dict[str, str] | None = None,
 ) -> ToolFunc | LoadedWithMeta:
+    _dprint(f"spec={spec}")
+
     root, manifest_path = _resolve_tool_root(spec, tool_dir_override)
     m = _read_manifest(manifest_path)
 
@@ -436,6 +466,11 @@ def load(
 
     # enforce interpreter whitelist and available
     ep = m["entrypoint"]
+
+    _dprint(f"resolved root={root}")
+    _dprint(f"manifest={manifest_path}")
+    _dprint(f'entry.command="{ep["command"]}" args={ep.get("args", [])}')
+
     _assert_allowed_interpreter(ep["command"])
     _assert_interpreter_available(ep["command"], ep.get("env", {}), env)
 
