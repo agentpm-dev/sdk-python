@@ -70,31 +70,92 @@ def is_interpreter_match(runtime: str, command: str) -> bool:
 
 
 def _list_installed_versions(base: Path, name: str) -> list[str]:
-    """Return all installed x.y.z versions for a tool name."""
-    out: set[str] = set()
+    """Return all installed x.y.z versions for a tool name, searching all name dir variants."""
+    seen: set[str] = set()
 
-    nested = base / name
-    if nested.is_dir():
-        for p in nested.iterdir():
-            if p.is_dir():
-                v = p.name
-                try:
-                    VersionInfo.parse(v)
-                except ValueError:
-                    continue
-                if (p / "agent.json").exists():
-                    out.add(v)
+    for name_dir in candidate_name_dirs(str(base), name):
+        root = Path(name_dir)
+        if not root.is_dir():
+            continue
+
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+
+            v = child.name
+            try:
+                # validate semver
+                VersionInfo.parse(v)
+            except ValueError:
+                continue
+
+            if (child / "agent.json").exists():
+                seen.add(v)
 
     # highest first
-    return sorted(out, key=VersionInfo.parse, reverse=True)
+    return sorted(seen, key=VersionInfo.parse, reverse=True)
+
+
+def candidate_name_dirs(base: str, name: str) -> list[str]:
+    """
+    Supports names like "@scope/name" or "scope/name".
+    Tries:
+      base/@scope/name, base/scope/name, base/scope__name, base/scope-name
+    Falls back to base/name for unscoped.
+    """
+    parts = name.split("/")
+
+    if len(parts) == 2:
+        raw_scope, pkg = parts
+        scope = raw_scope[1:] if raw_scope.startswith("@") else raw_scope
+        return [
+            os.path.join(base, f"@{scope}", pkg),  # with '@'
+            os.path.join(base, scope, pkg),  # without '@'
+            os.path.join(base, f"{scope}__{pkg}"),
+            os.path.join(base, f"{scope}-{pkg}"),
+        ]
+
+    # Unscoped package
+    return [os.path.join(base, name)]
 
 
 def _find_installed(base: Path, name: str, version: str) -> tuple[Path, Path] | None:
-    """Return (root, manifest_path) if this exact version exists."""
-    nested_manifest = base / name / version / "agent.json"
-    if nested_manifest.exists():
-        return nested_manifest.parent, nested_manifest
+    """Return (root, manifest_path) if this exact version exists, searching all name dir variants."""
+    for name_dir in candidate_name_dirs(str(base), name):
+        root = Path(name_dir) / version
+        manifest = root / "agent.json"
+        if manifest.exists():
+            return root, manifest
     return None
+
+
+def find_project_root(start_dir: str | Path) -> Path:
+    """
+    Walk up from start_dir looking for project markers.
+    Priority: agent.json, package.json, pnpm-workspace.yaml, turbo.json, lerna.json, .git
+    Returns the resolved start_dir if nothing is found.
+    """
+    dir_path = Path(start_dir).resolve()
+    while True:
+        if (dir_path / "agent.json").exists():
+            return dir_path
+        if (dir_path / "package.json").exists():
+            return dir_path
+        if (dir_path / "pnpm-workspace.yaml").exists():
+            return dir_path
+        if (dir_path / "turbo.json").exists():
+            return dir_path
+        if (dir_path / "lerna.json").exists():
+            return dir_path
+        if (dir_path / ".git").exists():
+            return dir_path
+
+        parent = dir_path.parent
+        if parent == dir_path:  # reached filesystem root
+            break
+        dir_path = parent
+
+    return Path(start_dir).resolve()
 
 
 def _normalize_selector(selector: str) -> str:
@@ -150,16 +211,24 @@ def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, 
     at = spec.rfind("@")
     if at <= 0 or at == len(spec) - 1:
         raise ValueError(f'Invalid tool spec "{spec}". Expected "@scope/name@version".')
-    selector, name = spec[at + 1 :].strip(), spec[:at]
+
+    selector = spec[at + 1 :].strip()
+
+    raw_name = spec[:at]
+    name = raw_name[1:] if raw_name.startswith("@") else raw_name  # drop leading '@' if present
+
+    project_root = find_project_root(Path.cwd())
 
     # candidate search roots (project first)
     candidates: list[Path] = []
     if tool_dir_override:
         candidates.append(Path(tool_dir_override))
+
     env_dir = os.getenv("AGENTPM_TOOL_DIR")
     if env_dir:
         candidates.append(Path(env_dir))
-    candidates.append(Path.cwd() / ".agentpm" / "tools")
+
+    candidates.append(project_root / ".agentpm" / "tools")
     candidates.append(Path.home() / ".agentpm" / "tools")
 
     # 1) Exact version fast path
