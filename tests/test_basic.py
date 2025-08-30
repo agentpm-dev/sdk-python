@@ -136,10 +136,27 @@ def tmp_tools_dir() -> Iterator[Path]:
 
 
 def test_loads_and_invokes_entrypoint(tmp_tools_dir: Path) -> None:
+    # def shell_full_path() -> str:
+    #     cmds = [
+    #         ["zsh", "-ilc", 'print -r -- $PATH'],          # zsh: interactive + login
+    #         ["bash", "-lic", 'printf "%s" "$PATH"'],       # bash fallback
+    #     ]
+    #     for cmd in cmds:
+    #         try:
+    #             out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    #             path = out.stdout.strip()
+    #             if path:
+    #                 return path
+    #         except Exception:
+    #             pass
+    #     return os.environ.get("PATH", "")
+    #
+    # env_path = shell_full_path()
+
     ok_spec = "@zack/summarize@0.1.0"
     _write_tool_package(tmp_tools_dir, ok_spec, command="python", script_file="tool.py")
 
-    summarize = load(ok_spec, tool_dir_override=str(tmp_tools_dir))
+    summarize = load(ok_spec, tool_dir_override=str(tmp_tools_dir))  # , env={"PATH": env_path}
     result = summarize({"text": "hello world"})
     assert isinstance(result, dict)
     assert result == {"summary": "HELLO WORLD"}

@@ -38,15 +38,20 @@ def _assert_allowed_interpreter(cmd: str) -> None:
 
 
 # verify the interpreter exists on PATH
-def _assert_interpreter_available(cmd: str) -> None:
-    try:
-        subprocess.run(
-            [cmd, "--version"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except FileNotFoundError as e:
+def _assert_interpreter_available(
+    cmd: str, entry_env: dict[str, str] | None, caller_env: dict[str, str] | None
+) -> None:
+    merged = os.environ.copy()
+    if entry_env:
+        merged.update(entry_env)
+    if caller_env:
+        merged.update(caller_env)
+
+    if shutil.which(cmd, path=merged.get("PATH", "")) is None:
         raise FileNotFoundError(
-            f'Interpreter "{cmd}" not found on PATH. Install it to load tool.'
-        ) from e
+            f'Interpreter "{cmd}" not found on PATH. '
+            'Install it, or pass PATH via load(..., env={"PATH": os.environ["PATH"]}).'
+        )
 
 
 def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
@@ -427,10 +432,12 @@ def load(
     root, manifest_path = _resolve_tool_root(spec, tool_dir_override)
     m = _read_manifest(manifest_path)
 
+    env = env or {}
+
     # enforce interpreter whitelist and available
     ep = m["entrypoint"]
     _assert_allowed_interpreter(ep["command"])
-    _assert_interpreter_available(ep["command"])
+    _assert_interpreter_available(ep["command"], ep.get("env", {}), env)
 
     # enforce interpreter and runtime compatability
     if "runtime" in m and "type" in m["runtime"]:
@@ -441,7 +448,6 @@ def load(
         if timeout is not None
         else float(ep.get("timeout_ms") or (DEFAULT_TIMEOUT * 1000)) / 1000.0
     )
-    env = env or {}
 
     def func(input: JsonValue) -> JsonValue:
         return _spawn_once(root, ep, input, t_s, env)
