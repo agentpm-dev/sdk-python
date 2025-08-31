@@ -56,8 +56,40 @@ def _canonical(cmd: str) -> str:
     return base
 
 
+def _interpreter_family(cmd: str) -> str | None:
+    base = os.path.basename(cmd).lower()
+    if base in ("node", "nodejs"):
+        return "node"
+    if base.startswith("python"):
+        return "python"
+    return None  # absolute paths still get matched by basename
+
+
+def _resolve_interpreter_command(
+    cmd: str,
+    entry_env: dict[str, str] | None,
+    caller_env: dict[str, str] | None,
+    runtime_type: str | None,
+) -> str:
+    merged = _merge_env(entry_env, caller_env)
+
+    # Prefer inferring from the command; fall back to runtime hint if needed
+    inferred = _interpreter_family(cmd)
+    hint = runtime_type if runtime_type == "node" or runtime_type == "python" else None
+    family = inferred or hint or None
+
+    if family == "node" and merged.get("AGENTPM_NODE"):
+        _dprint(f'override interpreter (node): "{cmd}" -> "{merged["AGENTPM_NODE"]}"')
+        return merged["AGENTPM_NODE"]
+    if family == "python" and merged.get("AGENTPM_PYTHON"):
+        _dprint(f'override interpreter (python): "{cmd}" -> "{merged["AGENTPM_PYTHON"]}"')
+        return merged["AGENTPM_PYTHON"]
+    return cmd
+
+
 def _assert_allowed_interpreter(cmd: str) -> None:
-    if _canonical(cmd) not in _ALLOWED:
+    canon = _canonical(cmd)
+    if canon not in _ALLOWED and not canon.startswith("pyhton3"):
         raise ValueError(
             f'Unsupported agent.json.entrypoint.command "{cmd}". Allowed: node|nodejs|python|python3'
         )
@@ -374,12 +406,12 @@ def _spawn_once(
 
     # 3) Command + hardening flags
     cmd = [entry["command"], *entry.get("args", [])]
-    if entry["command"].startswith("python"):
+    if _canonical(entry["command"]).startswith("python"):
         if "-I" not in cmd:
             cmd.insert(1, "-I")
         if "-B" not in cmd:
             cmd.insert(1, "-B")
-    elif entry["command"].startswith("node"):
+    elif _canonical(entry["command"]).startswith("node"):
         if not any(a.startswith("--max-old-space-size") for a in cmd):
             cmd.insert(1, "--max-old-space-size=256")
 
@@ -471,12 +503,18 @@ def load(
     _dprint(f"manifest={manifest_path}")
     _dprint(f'entry.command="{ep["command"]}" args={ep.get("args", [])}')
 
-    _assert_allowed_interpreter(ep["command"])
-    _assert_interpreter_available(ep["command"], ep.get("env", {}), env)
+    runtime = m.get("runtime") or {}
+    rt = runtime.get("type")
+    runtime_type: str | None = rt if rt in ("node", "python") else None
+    resolved_cmd = _resolve_interpreter_command(ep["command"], ep.get("env", {}), env, runtime_type)
+
+    # enforce interpreter whitelist and available
+    _assert_allowed_interpreter(resolved_cmd)
+    _assert_interpreter_available(resolved_cmd, ep.get("env", {}), env)
 
     # enforce interpreter and runtime compatability
     if "runtime" in m and "type" in m["runtime"]:
-        _assert_interpreter_matches_runtime(ep["command"], m["runtime"])
+        _assert_interpreter_matches_runtime(resolved_cmd, m["runtime"])
 
     t_s = (
         timeout
@@ -484,8 +522,10 @@ def load(
         else float(ep.get("timeout_ms") or (DEFAULT_TIMEOUT * 1000)) / 1000.0
     )
 
+    entry_for_spawn = ep | {"command": resolved_cmd}
+
     def func(input: JsonValue) -> JsonValue:
-        return _spawn_once(root, ep, input, t_s, env)
+        return _spawn_once(root, entry_for_spawn, input, t_s, env)
 
     if with_meta:
         name = m["name"]

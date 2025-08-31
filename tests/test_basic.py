@@ -72,6 +72,7 @@ sys.stdout.write(json.dumps(out))
                 "cwd": ".",
                 "timeout_ms": 30000,
             },
+            "runtime": {"type": "python", "version": "20"},
             "kind": "tool",
         }
         (root / "agent.json").write_text(json.dumps(agent_json, indent=2), encoding="utf-8")
