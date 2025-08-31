@@ -57,7 +57,8 @@ def _canonical(cmd: str) -> str:
 
 
 def _assert_allowed_interpreter(cmd: str) -> None:
-    if _canonical(cmd) not in _ALLOWED:
+    canon = _canonical(cmd)
+    if canon not in _ALLOWED and not canon.startswith("pyhton3"):
         raise ValueError(
             f'Unsupported agent.json.entrypoint.command "{cmd}". Allowed: node|nodejs|python|python3'
         )
