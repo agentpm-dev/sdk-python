@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Literal, cast, overload
 
@@ -366,24 +367,51 @@ def _build_env(
     return {**base, **entry_env, **caller_env}
 
 
-IS_POSIX = os.name == "posix"
-IS_DARWIN = sys.platform == "darwin"
-
-
-def _preexec_rlimits(
+def _preexec_rlimits_for(
+    cmd: str,
     *,
     max_cpu_s: int | None = 10,
-    max_files: int | None = 256,
+    max_files: int | None = 512,
     max_addr_mb: int | None = 512,
 ) -> Callable[[], None]:
+    """
+    Apply rlimits safely per interpreter.
+
+    - Node (node/nodejs): SKIP RLIMIT_AS by default (V8 JIT/WASM need large VA space).
+      You can force a value with env AGENTPM_RLIMIT_AS_MB.
+    - Python: keep modest RLIMIT_AS if you want.
+    """
+    import os
+    import resource  # type: ignore
+
+    IS_DARWIN = os.uname().sysname == "Darwin"
+    fam = _canonical(cmd)
+    is_node = fam in ("node", "nodejs")
+
+    # Optional global override
+    env_override = os.getenv("AGENTPM_RLIMIT_AS_MB")
+    addr_mb = max_addr_mb
+    if env_override:
+        with suppress(ValueError):
+            parsed = int(env_override)
+            if parsed > 0:
+                addr_mb = parsed
+
+    # Default: do NOT cap address space for Node
+    if is_node and env_override is None:
+        addr_mb = None
+
+    _dprint(
+        f"rlimits: cmd={cmd} RLIMIT_AS={'off' if is_node and env_override is None else addr_mb}MB"
+    )
+
     def _fn() -> None:
         if max_cpu_s is not None and hasattr(resource, "RLIMIT_CPU"):
             resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_s, max_cpu_s))
         if max_files is not None and hasattr(resource, "RLIMIT_NOFILE"):
             resource.setrlimit(resource.RLIMIT_NOFILE, (max_files, max_files))
-        # RLIMIT_AS is fragile on macOS; skip there
-        if max_addr_mb is not None and not IS_DARWIN and hasattr(resource, "RLIMIT_AS"):
-            limit = max_addr_mb * 1024 * 1024
+        if addr_mb is not None and not IS_DARWIN and hasattr(resource, "RLIMIT_AS"):
+            limit = addr_mb * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
     return _fn
@@ -404,7 +432,10 @@ def _spawn_once(
     tmpd = str(work / "tmp")
     Path(tmpd).mkdir(parents=True, exist_ok=True)
 
-    # 3) Command + hardening flags
+    # 3) Clean env
+    env = _build_env(entry.get("env", {}), env, home, tmpd)
+
+    # 4) Command + hardening flags
     cmd = [entry["command"], *entry.get("args", [])]
     if _canonical(entry["command"]).startswith("python"):
         if "-I" not in cmd:
@@ -412,22 +443,22 @@ def _spawn_once(
         if "-B" not in cmd:
             cmd.insert(1, "-B")
     elif _canonical(entry["command"]).startswith("node"):
+        old_space = int(env.get("AGENTPM_NODE_OLD_SPACE_MB", "256"))
+
         if not any(a.startswith("--max-old-space-size") for a in cmd[1:]):
-            cmd.insert(1, "--max-old-space-size=256")
+            cmd.insert(1, f"--max-old-space-size={old_space}")
 
         want_jitless = (
             any(a == "--jitless" for a in cmd[1:])
             or "--jitless" in (env or {}).get("NODE_OPTIONS", "")
-            or os.getenv("AGENTPM_NODE_JITLESS", "").lower() in ("1", "true", "yes")
+            or env.get("AGENTPM_NODE_JITLESS", "").lower() in ("1", "true", "yes")
         )
         if want_jitless and "--jitless" not in cmd[1:]:
             cmd.insert(1, "--jitless")
 
-    # 4) Clean env
-    env = _build_env(entry.get("env", {}), env, home, tmpd)
-
     _dprint(f"launch: argv={cmd}")
     _dprint(f"cwd={tool_cwd}")
+    # _dprint(f"env={env}")
     # 5) Spawn (cwd = tool_cwd)
     proc = subprocess.Popen(
         cmd,
@@ -438,7 +469,9 @@ def _spawn_once(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        preexec_fn=_preexec_rlimits() if hasattr(resource, "setrlimit") else None,
+        preexec_fn=(
+            _preexec_rlimits_for(entry["command"]) if hasattr(resource, "setrlimit") else None
+        ),
     )
     try:
         stdout, stderr = proc.communicate(input=json.dumps(payload), timeout=timeout_s)
@@ -452,6 +485,14 @@ def _spawn_once(
         raise RuntimeError("Tool produced too much output; limit is 10MB")
 
     if proc.returncode != 0:
+        # Save full streams for inspection and KEEP the run dir on error
+        try:
+            (work / "child.stdout").write_text(stdout or "", encoding="utf-8")
+            (work / "child.stderr").write_text(stderr or "", encoding="utf-8")
+        except Exception:
+            pass
+        _dprint(f"[agentpm] child logs saved in: {work}")
+
         tail = stderr[-4000:] if stderr else ""
         raise RuntimeError(f"Tool exited with code {proc.returncode}. Stderr (tail):\n{tail}")
 
