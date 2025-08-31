@@ -256,6 +256,8 @@ AGENTPM_PYTHON=/usr/local/bin/python3.11
 
 - Prefer absolute interpreters in agent.json.entrypoint.command for production (e.g., /usr/bin/node). The SDKs still enforce the Node/Python family.
 
+---
+
 ## Troubleshooting
 
 - **`No JSON object found on stdout.`**
