@@ -209,6 +209,53 @@ uv run twine upload -r testpypi dist/*
 
 ---
 
+## Running mixed-runtime Agent apps with Docker
+
+Some AgentPM tools run on Node, some on Python—and your agent may need to spawn both. Using Docker gives you a single, reproducible environment where both interpreters are installed and on PATH, which avoids the common “interpreter not found” issues that pop up on PaaS/CI or IDEs.
+
+Why Docker?
+
+✅ Hermetic: Python + Node versions are pinned inside the image.
+
+✅ No PATH drama: node/python are present and discoverable.
+
+✅ Prod/CI parity: the same image runs on your laptop, CI, and servers.
+
+✅ Easy secrets: pass API keys via env at docker run/Compose time.
+
+✅ Fewer surprises: consistent OS libs for LLM clients, SSL, etc.
+
+### When to use it
+
+- You deploy to platforms that don’t let you apt-get both runtimes.
+- Your agent uses tools with different interpreters (Node + Python).
+- Your local dev/IDE PATH differs from production and causes failures.
+- You want reproducible builds and easy rollback.
+
+### How to use it
+
+1. Copy the provided Dockerfile into your repo.
+2. (Optional) Pre-install tools locally with agentpm install ... and commit or copy .agentpm/tools/ into the image, or run agentpm install at build time if your CLI is available in the image.
+3. Build & run:
+
+```bash
+docker build -t agent-app .
+docker run --rm -e OPENAI_API_KEY=$OPENAI_API_KEY agent-app
+```
+
+4. For development, use the docker-compose.yml snippet to mount your source and pass env vars conveniently.
+
+### Troubleshooting
+
+- Set `AGENTPM_DEBUG=1` to print the SDK’s project root, search paths, merged PATH, and resolved interpreters.
+- You can force interpreters via:
+```ini
+AGENTPM_NODE=/usr/bin/node
+AGENTPM_PYTHON=/usr/local/bin/python3.11
+```
+
+- Prefer absolute interpreters in agent.json.entrypoint.command for production (e.g., /usr/bin/node). The SDKs still enforce the Node/Python family.
+
 ## Troubleshooting
 
 - **`No JSON object found on stdout.`**
