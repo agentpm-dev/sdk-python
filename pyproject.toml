@@ -50,6 +50,9 @@ Repository = "https://github.com/agentpm-dev/sdk-python/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentpm"]
 
+[tool.hatch.build.targets.sdist]
+include = ["src/agentpm", "pyproject.toml", "README.md", "LICENSE*"]
+
 [tool.hatch.build]
 include = ["src/agentpm/py.typed"]
 
