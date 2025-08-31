@@ -412,12 +412,22 @@ def _spawn_once(
         if "-B" not in cmd:
             cmd.insert(1, "-B")
     elif _canonical(entry["command"]).startswith("node"):
-        if not any(a.startswith("--max-old-space-size") for a in cmd):
+        if not any(a.startswith("--max-old-space-size") for a in cmd[1:]):
             cmd.insert(1, "--max-old-space-size=256")
+
+        want_jitless = (
+            any(a == "--jitless" for a in cmd[1:])
+            or "--jitless" in (env or {}).get("NODE_OPTIONS", "")
+            or os.getenv("AGENTPM_NODE_JITLESS", "").lower() in ("1", "true", "yes")
+        )
+        if want_jitless and "--jitless" not in cmd[1:]:
+            cmd.insert(1, "--jitless")
 
     # 4) Clean env
     env = _build_env(entry.get("env", {}), env, home, tmpd)
 
+    _dprint(f"launch: argv={cmd}")
+    _dprint(f"cwd={tool_cwd}")
     # 5) Spawn (cwd = tool_cwd)
     proc = subprocess.Popen(
         cmd,
