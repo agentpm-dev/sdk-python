@@ -234,7 +234,7 @@ Why Docker?
 
 ### How to use it
 
-1. Copy the provided Dockerfile into your repo.
+1. Copy the provided [Dockerfile](https://github.com/agentpm-dev/sdk-python/tree/main/examples/python-agent) into your repo.
 2. (Optional) Pre-install tools locally with agentpm install ... and commit or copy .agentpm/tools/ into the image, or run agentpm install at build time if your CLI is available in the image.
 3. Build & run:
 
