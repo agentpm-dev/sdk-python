@@ -37,8 +37,8 @@ jobs:
           echo "Tag: $TAG  PyProject: $PYVER"
           [ "$TAG" = "$PYVER" ] || { echo "Tag v$TAG != pyproject version $PYVER"; exit 1; }
 
-      - name: Install build deps
-        run: uv pip install -e ".[dev]"
+      - name: Install build deps (minimal)
+        run: uv pip install --system build twine
 
       - name: Build sdist & wheel
         run: uv run python -m build
