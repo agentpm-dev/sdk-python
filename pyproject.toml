@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentpm"
-version = "0.0.0"
+version = "0.1.0"
 description = "AgentPM Python SDK"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -44,7 +44,9 @@ langchain = [ "langchain-core>=0.2.0" ]
 
 [project.urls]
 Homepage = "https://github.com/agentpm-dev/sdk-python"
-Repository = "https://github.com/agentpm-dev/sdk-python/issues"
+Repository = "https://github.com/agentpm-dev/sdk-python"
+Issues = "https://github.com/agentpm-dev/sdk-python/issues"
+Changelog = "https://github.com/agentpm-dev/sdk-python/releases"
 
 # Ensure type hints are shipped
 [tool.hatch.build.targets.wheel]
