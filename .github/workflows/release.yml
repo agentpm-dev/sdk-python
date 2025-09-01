@@ -44,8 +44,11 @@ jobs:
           [ "$TAG" = "$PYVER" ] || { echo "Tag v$TAG != pyproject version $PYVER"; exit 1; }
 
 
-      - name: Install build deps (minimal)
-        run: uv pip install --system build twine
+      - name: Create venv
+        run: uv venv --python 3.12
+
+      - name: Install build deps (in venv)
+        run: uv pip install build twine
 
       - name: Build sdist & wheel
         run: uv run python -m build
