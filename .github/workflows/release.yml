@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write   # required for PyPI Trusted Publishing (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Verify tag matches pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PYVER=$(python - <<'PY'
+          import tomllib, sys
+          data = tomllib.loads(open("pyproject.toml","rb").read())
+          print(data["project"]["version"])
+          PY
+          )
+          echo "Tag: $TAG  PyProject: $PYVER"
+          [ "$TAG" = "$PYVER" ] || { echo "Tag v$TAG != pyproject version $PYVER"; exit 1; }
+
+      - name: Install build deps (minimal)
+        run: uv pip install --system build twine
+
+      - name: Build sdist & wheel
+        run: uv run python -m build
+
+      - name: Verify package metadata
+        run: uv run twine check dist/*
+
+      # Publish to PyPI using OIDC (Trusted Publisher)
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+          verbose: true
