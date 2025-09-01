@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-lint-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Create venv
+        run: uv venv --python ${{ matrix.python-version }}
+
+      - name: Install project (dev + langchain extras)
+        run: uv pip install -e ".[dev,langchain]"
+
+      - name: Run pre-commit (ruff/black/mypy & misc hooks)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build sdist & wheel
+        run: uv run python -m build
+
+      - name: Verify package metadata
+        run: uv run twine check dist/*
+
+      - name: Smoke test the wheel (import)
+        run: |
+          uv venv --seed
+          uv pip install dist/*.whl
+          uv run python - <<'PY'
+          import importlib.metadata
+          print("agentpm version:", importlib.metadata.version("agentpm"))
+          import agentpm  # noqa: F401
+          PY
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.python-version }}
+          path: dist/*
