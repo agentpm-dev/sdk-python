@@ -29,13 +29,20 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PYVER=$(python - <<'PY'
-          import tomllib, sys
-          data = tomllib.loads(open("pyproject.toml","rb").read())
+          import sys
+          try:
+            import tomllib  # py311+
+          except ModuleNotFoundError:
+            import tomli as tomllib  # fallback if runner isn't 3.11+
+          with open("pyproject.toml", "rb") as f:
+            data = tomllib.load(f)  # <-- use load(fp) for bytes
           print(data["project"]["version"])
           PY
           )
-          echo "Tag: $TAG  PyProject: $PYVER"
+          echo "Tag:
+            $TAG  PyProject: $PYVER"
           [ "$TAG" = "$PYVER" ] || { echo "Tag v$TAG != pyproject version $PYVER"; exit 1; }
+
 
       - name: Install build deps (minimal)
         run: uv pip install --system build twine
