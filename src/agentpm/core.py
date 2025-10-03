@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import resource
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Literal, cast, overload
+from typing import Any, Literal, TextIO, cast, overload
 
 from semver import VersionInfo
 from semver import match as semver_match
 
 from .types import Entrypoint, JsonValue, LoadedWithMeta, Manifest, Runtime, ToolFunc, ToolMeta
+
+MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap across stdout+stderr
+GRACE_AFTER_JSON = 0.40  # seconds to let the child exit after JSON seen
+POST_MORTEM_DRAIN = 0.15  # seconds to keep draining pipes after child exit
+SELECT_TIMEOUT = 0.05  # selector poll timeout
 
 DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
@@ -459,6 +468,7 @@ def _spawn_once(
     _dprint(f"launch: argv={cmd}")
     _dprint(f"cwd={tool_cwd}")
     # _dprint(f"env={env}")
+
     # 5) Spawn (cwd = tool_cwd)
     proc = subprocess.Popen(
         cmd,
@@ -468,21 +478,109 @@ def _spawn_once(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=0,
         start_new_session=True,
         preexec_fn=(
             _preexec_rlimits_for(entry["command"]) if hasattr(resource, "setrlimit") else None
         ),
+        close_fds=True,
     )
-    try:
-        stdout, stderr = proc.communicate(input=json.dumps(payload), timeout=timeout_s)
-    except subprocess.TimeoutExpired as e:
-        proc.kill()
-        raise TimeoutError(f"Tool timed out after {timeout_s:.1f}s") from e
 
-    # Cap outputs (10MB)
-    max_bytes = 10 * 1024 * 1024
-    if len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) > max_bytes:
-        raise RuntimeError("Tool produced too much output; limit is 10MB")
+    with contextlib.suppress(Exception):
+        data = json.dumps(payload)
+        assert proc.stdin is not None
+        proc.stdin.write(data)
+        proc.stdin.flush()
+        proc.stdin.close()
+
+    sel = selectors.DefaultSelector()
+    assert proc.stdout and proc.stderr
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    sel.register(proc.stderr, selectors.EVENT_READ)
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    stdout_eof = False
+    stderr_eof = False
+    total_bytes = 0
+
+    got_json = None
+    got_json_at: float | None = None
+    sent_term = False
+    sent_kill = False
+    dead_at: float | None = None
+
+    deadline = time.monotonic() + timeout_s
+
+    while True:
+        now = time.monotonic()
+        if now > deadline:
+            _kill_proc(proc, signal.SIGKILL)
+            raise TimeoutError(f"Tool timed out after {timeout_s:.1f}s")
+
+        # If we already have a valid JSON object, give the child a small grace window to exit.
+        if got_json and got_json_at and proc.poll() is None:
+            if (now - got_json_at) > GRACE_AFTER_JSON and not sent_term:
+                _kill_proc(proc, signal.SIGTERM)
+                sent_term = True
+                term_sent_at = now
+            elif sent_term and not sent_kill and (now - term_sent_at) > 0.15:
+                _kill_proc(proc, signal.SIGKILL)
+                sent_kill = True
+
+        # Read any available data
+        events = sel.select(timeout=SELECT_TIMEOUT)
+        for key, _ in events:
+            stream = cast(TextIO, key.fileobj)
+            try:
+                chunk = stream.read()
+            except Exception:
+                chunk = None
+
+            # EOF for this stream
+            if chunk == "":
+                if stream is proc.stdout:
+                    stdout_eof = True
+                    with contextlib.suppress(Exception):
+                        sel.unregister(proc.stdout)
+                elif stream is proc.stderr:
+                    stderr_eof = True
+                    sel.unregister(proc.stdout)
+                    with contextlib.suppress(Exception):
+                        sel.unregister(proc.stderr)
+                continue
+
+            if not chunk:
+                continue
+
+            # Accumulate and enforce output cap
+            enc_len = len(chunk.encode("utf-8", "ignore"))
+            total_bytes += enc_len
+            if total_bytes > MAX_BYTES:
+                _kill_proc(proc, signal.SIGKILL)
+                raise RuntimeError("Tool produced too much output; limit is 10MB")
+
+            if stream is proc.stdout:
+                stdout_parts.append(chunk)
+                # Try JSON parse only until we succeed once
+                if not got_json:
+                    obj, _slice, _s, _e = _try_extract_json("".join(stdout_parts))
+                    if obj is not None:
+                        got_json = obj
+                        got_json_at = time.monotonic()
+            else:
+                stderr_parts.append(chunk)
+
+        # If process died, do a short post-mortem drain for any tail bytes
+        if proc.poll() is not None:
+            if dead_at is None:
+                dead_at = now
+            # Keep draining for a tiny window OR until both pipes EOF
+            if (stdout_eof and stderr_eof) or (now - dead_at) > POST_MORTEM_DRAIN:
+                break
+
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
 
     if proc.returncode != 0:
         # Save full streams for inspection and KEEP the run dir on error
@@ -493,25 +591,66 @@ def _spawn_once(
             pass
         _dprint(f"[agentpm] child logs saved in: {work}")
 
+    # If we didn't parse JSON in-stream, fall back to a last-chance extractor
+    if got_json is None:
+        # Reuse your existing parser if you have it:
+        # got_json = _extract_last_json(stdout)
+        # Minimal safe fallback:
+        try:
+            got_json = json.loads(stdout.strip())
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to parse tool JSON output.\nStderr:\n{stderr}\nStdout:\n{stdout}\nReason: {e}"
+            ) from e
+
+    if proc.returncode != 0:
         tail = stderr[-4000:] if stderr else ""
         raise RuntimeError(f"Tool exited with code {proc.returncode}. Stderr (tail):\n{tail}")
 
+    # Success: cleanup and return parsed JSON
+    shutil.rmtree(work, ignore_errors=True)
+    return got_json
+
+
+def _kill_proc(proc: subprocess.Popen, sig: int) -> None:
     try:
-        return _extract_last_json(stdout)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to parse tool JSON output.\nStderr:\n{stderr}\nStdout:\n{stdout}\nReason: {e}"
-        ) from e
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if os.name == "posix":
+            # send to process group (we started a new session below)
+            os.killpg(proc.pid, sig)
+        else:
+            # Windows: use terminate/kill equivalents
+            if sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+    except Exception:
+        pass
 
 
-def _extract_last_json(text: str) -> JsonValue:
-    # naive but effective: scan for last '{' and try parse json from there.
-    idx = text.rfind("{")
-    if idx < 0:
-        raise RuntimeError("No JSON object found on stdout.")
-    return json.loads(text[idx:])  # type: ignore[no-any-return]
+def _try_extract_json(buf: str) -> tuple[Any, str | None, int | None, int | None]:
+    """
+    Heuristic: find the first complete top-level JSON object in `buf`
+    using brace depth. Returns (obj, slice_text, start_idx, end_idx) or
+    (None, None, None, None) if not found / not parseable yet.
+    """
+    depth = 0
+    start = None
+    for i, ch in enumerate(buf):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    s = buf[start : i + 1]
+                    try:
+                        return json.loads(s), s, start, i + 1
+                    except Exception:
+                        # keep scanning; may be partial/invalid JSON fragment
+                        pass
+    return None, None, None, None
 
 
 # --- Overloads (type-only) ---
