@@ -486,6 +486,11 @@ def _spawn_once(
         close_fds=True,
     )
 
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    os.set_blocking(proc.stdout.fileno(), False)
+    os.set_blocking(proc.stderr.fileno(), False)
+
     with contextlib.suppress(Exception):
         data = json.dumps(payload)
         assert proc.stdin is not None

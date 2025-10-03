@@ -42,13 +42,14 @@ def _write_tool_package(
 
         # Python entrypoint: reads stdin JSON, prints noise, then final JSON
         tool_py = """\
-import sys, json
+import sys, json, time
 inp = json.loads(sys.stdin.read() or "{}")
-print("stdout noise before json")  # intentional
+print("stdout noise before json")          # still buffered unless unbuffered mode
 print("stderr debug line", file=sys.stderr)
 text = (inp.get("text") or "")
 out = {"summary": text.upper()}
 sys.stdout.write(json.dumps(out))
+time.sleep(20)
 """
         (root / script_file).write_text(tool_py, encoding="utf-8")
 
@@ -68,7 +69,7 @@ sys.stdout.write(json.dumps(out))
             },
             "entrypoint": {
                 "command": command,
-                "args": [script_file],
+                "args": ["-u", script_file],
                 "cwd": ".",
                 "timeout_ms": 30000,
             },
