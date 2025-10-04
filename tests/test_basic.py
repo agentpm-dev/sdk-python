@@ -49,7 +49,6 @@ print("stderr debug line", file=sys.stderr)
 text = (inp.get("text") or "")
 out = {"summary": text.upper()}
 sys.stdout.write(json.dumps(out))
-time.sleep(20)
 """
         (root / script_file).write_text(tool_py, encoding="utf-8")
 
