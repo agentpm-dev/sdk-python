@@ -9,7 +9,7 @@ description = "AgentPM Python SDK"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "AgentPM", email = "dev@agentpm.dev" }]
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 keywords = ["agentpm", "ai", "tools", "agents"]
 classifiers = [
     "Programming Language :: Python :: 3",
