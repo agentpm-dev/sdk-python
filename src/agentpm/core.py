@@ -1,31 +1,32 @@
 from __future__ import annotations
 
+import codecs
 import contextlib
 import json
 import os
+import queue
 import re
 import resource
-import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Literal, TextIO, cast, overload
+from typing import Any, Literal, cast, overload
 
 from semver import VersionInfo
 from semver import match as semver_match
 
 from .types import Entrypoint, JsonValue, LoadedWithMeta, Manifest, Runtime, ToolFunc, ToolMeta
 
+READ_CHUNK = 65536
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap across stdout+stderr
 GRACE_AFTER_JSON = 0.40  # seconds to let the child exit after JSON seen
-POST_MORTEM_DRAIN = 0.15  # seconds to keep draining pipes after child exit
-SELECT_TIMEOUT = 0.05  # selector poll timeout
 
 DEFAULT_TIMEOUT = 120.0
 _ALLOWED = {"node", "nodejs", "python", "python3"}
@@ -429,6 +430,16 @@ def _preexec_rlimits_for(
 def _spawn_once(
     root: Path, entry: Entrypoint, payload: JsonValue, timeout_s: float, env: dict[str, str]
 ) -> JsonValue:
+    """
+    Cross-platform:
+      - Spawns child, writes JSON payload, closes stdin.
+      - Reads stdout/stderr in background threads (binary), decodes incrementally.
+      - Detects first complete JSON object in stdout.
+      - After JSON is seen, gives a small grace window, then terminates/kills if needed.
+      - Enforces timeout and 10MB total output cap.
+    Returns: (parsed_json, full_stdout_text, full_stderr_text)
+    Raises: TimeoutError or RuntimeError on failures.
+    """
     # 1) Tool working dir (what the tool expects for relative paths)
     tool_cwd = (root / entry.get("cwd", ".")).resolve()
 
@@ -465,6 +476,11 @@ def _spawn_once(
         if want_jitless and "--jitless" not in cmd[1:]:
             cmd.insert(1, "--jitless")
 
+    # Add -u for Python children (unbuffered); safe no-op for non-Python
+    # insert after interpreter
+    if cmd and os.path.basename(cmd[0]).lower().startswith("python") and "-u" not in cmd:
+        cmd = [cmd[0], "-u", *cmd[1:]]
+
     _dprint(f"launch: argv={cmd}")
     _dprint(f"cwd={tool_cwd}")
     # _dprint(f"env={env}")
@@ -477,157 +493,180 @@ def _spawn_once(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=False,  # binary pipes
         bufsize=0,
-        start_new_session=True,
+        start_new_session=(os.name == "posix"),
         preexec_fn=(
             _preexec_rlimits_for(entry["command"]) if hasattr(resource, "setrlimit") else None
         ),
         close_fds=True,
     )
 
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-    os.set_blocking(proc.stdout.fileno(), False)
-    os.set_blocking(proc.stderr.fileno(), False)
+    assert proc.stdout and proc.stderr
 
     with contextlib.suppress(Exception):
-        data = json.dumps(payload)
+        data = json.dumps(payload).encode("utf-8")
         assert proc.stdin is not None
         proc.stdin.write(data)
         proc.stdin.flush()
         proc.stdin.close()
 
-    sel = selectors.DefaultSelector()
-    assert proc.stdout and proc.stderr
-    sel.register(proc.stdout, selectors.EVENT_READ)
-    sel.register(proc.stderr, selectors.EVENT_READ)
+    # Queues for bytes
+    q_out: queue.Queue[bytes | None] = queue.Queue()
+    q_err: queue.Queue[bytes | None] = queue.Queue()
 
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
-    stdout_eof = False
-    stderr_eof = False
+    def reader(src, q: queue.Queue[bytes | None]):
+        try:
+            while True:
+                b = src.read(READ_CHUNK)
+                if not b:
+                    break
+                q.put(b)
+        finally:
+            q.put(None)
+
+    t_out = threading.Thread(target=reader, args=(proc.stdout, q_out), daemon=True)
+    t_err = threading.Thread(target=reader, args=(proc.stderr, q_err), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    # Incremental decoders
+    dec_out = codecs.getincrementaldecoder("utf-8")()
+    dec_err = codecs.getincrementaldecoder("utf-8")()
+
+    out_parts: list[str] = []
+    err_parts: list[str] = []
     total_bytes = 0
 
-    got_json = None
+    parsed: dict[str, Any] | None = None
     got_json_at: float | None = None
-    sent_term = False
-    sent_kill = False
-    dead_at: float | None = None
-
+    sent_term = sent_kill = False
     deadline = time.monotonic() + timeout_s
 
+    # Main loop: drain queues, detect JSON, apply grace-and-kill
     while True:
         now = time.monotonic()
         if now > deadline:
             _kill_proc(proc, signal.SIGKILL)
             raise TimeoutError(f"Tool timed out after {timeout_s:.1f}s")
 
-        # If we already have a valid JSON object, give the child a small grace window to exit.
-        if got_json and got_json_at and proc.poll() is None:
+        drained = False
+
+        # Drain stdout queue
+        while True:
+            try:
+                b = q_out.get_nowait()
+            except queue.Empty:
+                break
+
+            drained = True
+            if b is None:
+                # EOF marker for stdout
+                pass
+            else:
+                total_bytes += len(b)
+                if total_bytes > MAX_BYTES:
+                    _kill_proc(proc, signal.SIGKILL)
+                    raise RuntimeError("Tool produced too much output; 10MB limit")
+                chunk = dec_out.decode(b)
+                out_parts.append(chunk)
+                if parsed is None:
+                    obj, _slice, _s, _e = _try_extract_json("".join(out_parts))
+                    if obj is not None:
+                        parsed = obj
+                        got_json_at = time.monotonic()
+
+            q_out.task_done()
+
+        # Drain stderr queue
+        while True:
+            try:
+                b = q_err.get_nowait()
+            except queue.Empty:
+                break
+            drained = True
+            if b is None:
+                pass
+            else:
+                total_bytes += len(b)
+                if total_bytes > MAX_BYTES:
+                    _kill_proc(proc, signal.SIGKILL)
+                    raise RuntimeError("Tool produced too much output; 10MB limit")
+                err_parts.append(dec_err.decode(b))
+            q_err.task_done()
+
+        # If we've seen JSON, give a grace window, then TERM→KILL if still alive
+        if parsed is not None and got_json_at is not None and proc.poll() is None:
             if (now - got_json_at) > GRACE_AFTER_JSON and not sent_term:
                 _kill_proc(proc, signal.SIGTERM)
                 sent_term = True
-                term_sent_at = now
-            elif sent_term and not sent_kill and (now - term_sent_at) > 0.15:
+                term_at = now
+            elif sent_term and not sent_kill and (now - term_at) > 0.15:
                 _kill_proc(proc, signal.SIGKILL)
                 sent_kill = True
 
-        # Read any available data
-        events = sel.select(timeout=SELECT_TIMEOUT)
-        for key, _ in events:
-            stream = cast(TextIO, key.fileobj)
-            try:
-                chunk = stream.read()
-            except Exception:
-                chunk = None
+        # Break when child is gone and both reader threads have delivered EOF
+        if proc.poll() is not None and not t_out.is_alive() and not t_err.is_alive():
+            break
 
-            # EOF for this stream
-            if chunk == "":
-                if stream is proc.stdout:
-                    stdout_eof = True
-                    with contextlib.suppress(Exception):
-                        sel.unregister(proc.stdout)
-                elif stream is proc.stderr:
-                    stderr_eof = True
-                    sel.unregister(proc.stdout)
-                    with contextlib.suppress(Exception):
-                        sel.unregister(proc.stderr)
-                continue
+        if not drained:
+            time.sleep(0.02)  # avoid busy loop
 
-            if not chunk:
-                continue
+    # Flush decoders
+    out_parts.append(dec_out.decode(b"", final=True))
+    err_parts.append(dec_err.decode(b"", final=True))
+    stdout_text = "".join(out_parts)
+    stderr_text = "".join(err_parts)
 
-            # Accumulate and enforce output cap
-            enc_len = len(chunk.encode("utf-8", "ignore"))
-            total_bytes += enc_len
-            if total_bytes > MAX_BYTES:
-                _kill_proc(proc, signal.SIGKILL)
-                raise RuntimeError("Tool produced too much output; limit is 10MB")
+    runner_forced_exit = sent_term or sent_kill
 
-            if stream is proc.stdout:
-                stdout_parts.append(chunk)
-                # Try JSON parse only until we succeed once
-                if not got_json:
-                    obj, _slice, _s, _e = _try_extract_json("".join(stdout_parts))
-                    if obj is not None:
-                        got_json = obj
-                        got_json_at = time.monotonic()
-            else:
-                stderr_parts.append(chunk)
-
-        # If process died, do a short post-mortem drain for any tail bytes
-        if proc.poll() is not None:
-            if dead_at is None:
-                dead_at = now
-            # Keep draining for a tiny window OR until both pipes EOF
-            if (stdout_eof and stderr_eof) or (now - dead_at) > POST_MORTEM_DRAIN:
-                break
-
-    stdout = "".join(stdout_parts)
-    stderr = "".join(stderr_parts)
-
-    if proc.returncode != 0:
-        # Save full streams for inspection and KEEP the run dir on error
+    # Decide outcome
+    if parsed is None and proc.returncode == 0:
+        # Exit 0 but no JSON → parse failure
+        # keep run dir for inspection
         try:
-            (work / "child.stdout").write_text(stdout or "", encoding="utf-8")
-            (work / "child.stderr").write_text(stderr or "", encoding="utf-8")
+            (work / "child.stdout").write_text(stdout_text or "", encoding="utf-8")
+            (work / "child.stderr").write_text(stderr_text or "", encoding="utf-8")
         except Exception:
             pass
         _dprint(f"[agentpm] child logs saved in: {work}")
 
-    # If we didn't parse JSON in-stream, fall back to a last-chance extractor
-    if got_json is None:
-        # Reuse your existing parser if you have it:
-        # got_json = _extract_last_json(stdout)
-        # Minimal safe fallback:
-        try:
-            got_json = json.loads(stdout.strip())
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to parse tool JSON output.\nStderr:\n{stderr}\nStdout:\n{stdout}\nReason: {e}"
-            ) from e
+        raise RuntimeError(
+            f"Failed to parse tool JSON output.\n Stderr:\n{stderr_text}\nStdout:\n{stdout_text}"
+        )
 
-    if proc.returncode != 0:
-        tail = stderr[-4000:] if stderr else ""
+    if proc.returncode != 0 and not runner_forced_exit:
+        # Child failed on its own → persist logs and raise
+        try:
+            (work / "child.stdout").write_text(stdout_text or "", encoding="utf-8")
+            (work / "child.stderr").write_text(stderr_text or "", encoding="utf-8")
+        except Exception:
+            pass
+        _dprint(f"[agentpm] child logs saved in: {work}")
+
+        # Child failed on its own → raise
+        tail = stderr_text[-4000:] if stderr_text else ""
         raise RuntimeError(f"Tool exited with code {proc.returncode}. Stderr (tail):\n{tail}")
+
+    if parsed is None:
+        # Shouldn't happen if runner forced exit; guard anyway
+        raise RuntimeError(
+            f"Tool did not produce valid JSON.\n Stderr:\n{stderr_text}\nStdout:\n{stdout_text}"
+        )
 
     # Success: cleanup and return parsed JSON
     shutil.rmtree(work, ignore_errors=True)
-    return got_json
+    return parsed
 
 
 def _kill_proc(proc: subprocess.Popen, sig: int) -> None:
     try:
         if os.name == "posix":
-            # send to process group (we started a new session below)
+            # send to process group (we started a new session)
             os.killpg(proc.pid, sig)
         else:
             # Windows: use terminate/kill equivalents
-            if sig == signal.SIGTERM:
-                proc.terminate()
-            else:
-                proc.kill()
+            proc.terminate() if sig == signal.SIGTERM else proc.kill()
     except Exception:
         pass
 
