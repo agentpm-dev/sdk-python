@@ -211,6 +211,28 @@ def test_with_meta_returns_func_and_meta(tmp_tools_dir: Path) -> None:
     assert out.get("summary") == "ABC"
 
 
+def test_with_meta_returns_func_and_meta_with_env(tmp_tools_dir: Path) -> None:
+    with_env_spec = "@zack/with-env@0.1.0"
+    _write_tool_package(tmp_tools_dir, with_env_spec, with_env=True)
+
+    loaded = load(
+        with_env_spec,
+        with_meta=True,
+        tool_dir_override=str(tmp_tools_dir),
+        env={"OPENAI_API_KEY": "Zack"},
+    )
+    assert isinstance(loaded, dict)
+    assert "func" in loaded and "meta" in loaded
+    func = loaded["func"]
+    meta = loaded["meta"]
+    assert callable(func)
+    assert meta["environment"] is not None
+
+    out = func({"text": "abc"})
+    assert isinstance(out, dict)
+    assert out.get("summary") == "ABC"
+
+
 @pytest.mark.skipif(  # type: ignore[misc]  # pytest decorator is untyped
     pytest.importorskip("langchain_core", reason="langchain_core not installed") is None,
     reason="langchain_core missing",

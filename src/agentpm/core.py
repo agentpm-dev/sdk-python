@@ -795,6 +795,8 @@ def load(
             meta["inputs"] = cast(JsonValue, m["inputs"])
         if "outputs" in m:
             meta["outputs"] = cast(JsonValue, m["outputs"])
+        if "environment" in m:
+            meta["environment"] = m["environment"]
 
         return {"func": func, "meta": meta}
 

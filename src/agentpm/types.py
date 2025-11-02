@@ -14,6 +14,7 @@ class ToolMeta(TypedDict, total=False):
     inputs: NotRequired[JsonValue]
     outputs: NotRequired[JsonValue]
     runtime: NotRequired[Runtime]
+    environment: NotRequired[Environment]
 
 
 class Runtime(TypedDict, total=False):
@@ -41,7 +42,6 @@ class Environment(TypedDict, total=False):
 
 class Manifest(ToolMeta, total=False):
     entrypoint: Entrypoint
-    environment: Environment
 
 
 ToolFunc = Callable[[JsonValue], JsonValue]
