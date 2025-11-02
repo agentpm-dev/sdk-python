@@ -27,6 +27,7 @@ def _write_tool_package(
     spec: str,
     command: str = "python",
     script_file: str = "tool.py",
+    with_env: bool = False,
 ) -> dict[str, str]:
     """
     Create a fake tool package under base_dir in TWO layouts:
@@ -72,6 +73,20 @@ sys.stdout.write(json.dumps(out))
                 "cwd": ".",
                 "timeout_ms": 30000,
             },
+            "environment": (
+                {
+                    "vars": {
+                        "OPENAI_API_KEY": {"required": True, "description": "API key for OpenAI"},
+                        "OPENAI_BASE_URL": {
+                            "required": False,
+                            "description": "Custom API endpoint; defaults to https://api.openai.com/v1",
+                            "default": "https://api.openai.com/v1",
+                        },
+                    }
+                }
+                if with_env
+                else None
+            ),
             "runtime": {"type": "python", "version": "20"},
             "kind": "tool",
         }
@@ -155,9 +170,13 @@ def test_loads_and_invokes_entrypoint(tmp_tools_dir: Path) -> None:
     # env_path = shell_full_path()
 
     ok_spec = "@zack/summarize@0.1.0"
-    _write_tool_package(tmp_tools_dir, ok_spec, command="python", script_file="tool.py")
+    _write_tool_package(
+        tmp_tools_dir, ok_spec, command="python", script_file="tool.py", with_env=True
+    )
 
-    summarize = load(ok_spec, tool_dir_override=str(tmp_tools_dir))  # , env={"PATH": env_path}
+    summarize = load(
+        ok_spec, tool_dir_override=str(tmp_tools_dir), env={"OPENAI_API_KEY": "Zack"}
+    )  # , env={"PATH": env_path}
     result = summarize({"text": "hello world"})
     assert isinstance(result, dict)
     assert result == {"summary": "HELLO WORLD"}
@@ -186,6 +205,28 @@ def test_with_meta_returns_func_and_meta(tmp_tools_dir: Path) -> None:
     assert callable(func)
     assert meta["name"] == "@zack/summarize"
     assert meta["version"] == "0.1.0"
+
+    out = func({"text": "abc"})
+    assert isinstance(out, dict)
+    assert out.get("summary") == "ABC"
+
+
+def test_with_meta_returns_func_and_meta_with_env(tmp_tools_dir: Path) -> None:
+    with_env_spec = "@zack/with-env@0.1.0"
+    _write_tool_package(tmp_tools_dir, with_env_spec, with_env=True)
+
+    loaded = load(
+        with_env_spec,
+        with_meta=True,
+        tool_dir_override=str(tmp_tools_dir),
+        env={"OPENAI_API_KEY": "Zack"},
+    )
+    assert isinstance(loaded, dict)
+    assert "func" in loaded and "meta" in loaded
+    func = loaded["func"]
+    meta = loaded["meta"]
+    assert callable(func)
+    assert meta["environment"] is not None
 
     out = func({"text": "abc"})
     assert isinstance(out, dict)
@@ -237,5 +278,13 @@ def test_nonzero_exit_raises(tmp_tools_dir: Path) -> None:
     failing = load(fail_spec, tool_dir_override=str(tmp_tools_dir))
     with pytest.raises(Exception) as ei:
         failing({})
-    # Depending on your exact error, this may vary slightly:
     assert "exited with code 2" in str(ei.value)
+
+
+def test_missing_env_variables_raises(tmp_tools_dir: Path) -> None:
+    with_env_spec = "@zack/with-env@0.1.0"
+    _write_tool_package(tmp_tools_dir, with_env_spec, with_env=True)
+
+    with pytest.raises(Exception) as ei:
+        load(with_env_spec, tool_dir_override=str(tmp_tools_dir))
+    assert "Missing environment variable: OPENAI_API_KEY" in str(ei.value)

@@ -463,7 +463,7 @@ def _spawn_once(
         if "-B" not in cmd:
             cmd.insert(1, "-B")
     elif _canonical(entry["command"]).startswith("node"):
-        old_space = int(env.get("AGENTPM_NODE_OLD_SPACE_MB", "256"))
+        old_space = int(os.getenv("AGENTPM_NODE_OLD_SPACE_MB", "256"))
 
         if not any(a.startswith("--max-old-space-size") for a in cmd[1:]):
             cmd.insert(1, f"--max-old-space-size={old_space}")
@@ -471,7 +471,7 @@ def _spawn_once(
         want_jitless = (
             any(a == "--jitless" for a in cmd[1:])
             or "--jitless" in (env or {}).get("NODE_OPTIONS", "")
-            or env.get("AGENTPM_NODE_JITLESS", "").lower() in ("1", "true", "yes")
+            or os.getenv("AGENTPM_NODE_JITLESS", "").lower() in ("1", "true", "yes")
         )
         if want_jitless and "--jitless" not in cmd[1:]:
             cmd.insert(1, "--jitless")
@@ -737,6 +737,24 @@ def load(
     _dprint(f"manifest={manifest_path}")
     _dprint(f'entry.command="{ep["command"]}" args={ep.get("args", [])}')
 
+    # enforce expected/required environment
+    expected_env = m.get("environment") or {}
+    vars_obj = expected_env.get("vars", {}) if expected_env else {}
+    has_vars = bool(vars_obj) and isinstance(vars_obj, dict) and bool(list(vars_obj.values()))
+    if has_vars:
+        _dprint(f"tool-defined environment={expected_env}")
+
+        for k, v in vars_obj.items():
+            default_val: str | None = v.get("default")
+
+            if v.get("required") and not v.get("default") and k not in env:
+                raise ValueError(
+                    f"Missing environment variable: {k}. {k} is required and has no default value."
+                )
+            elif default_val is not None and k not in env:
+                # Set the default value
+                env[k] = default_val
+
     runtime = m.get("runtime") or {}
     rt = runtime.get("type")
     runtime_type: str | None = rt if rt in ("node", "python") else None
@@ -777,6 +795,8 @@ def load(
             meta["inputs"] = cast(JsonValue, m["inputs"])
         if "outputs" in m:
             meta["outputs"] = cast(JsonValue, m["outputs"])
+        if "environment" in m:
+            meta["environment"] = m["environment"]
 
         return {"func": func, "meta": meta}
 

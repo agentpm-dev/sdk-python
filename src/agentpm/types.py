@@ -14,6 +14,7 @@ class ToolMeta(TypedDict, total=False):
     inputs: NotRequired[JsonValue]
     outputs: NotRequired[JsonValue]
     runtime: NotRequired[Runtime]
+    environment: NotRequired[Environment]
 
 
 class Runtime(TypedDict, total=False):
@@ -27,6 +28,16 @@ class Entrypoint(TypedDict, total=False):
     cwd: str
     timeout_ms: int
     env: dict[str, str]
+
+
+class EnvVar(TypedDict, total=False):
+    required: bool
+    description: str
+    default: str | None
+
+
+class Environment(TypedDict, total=False):
+    vars: dict[str, EnvVar]
 
 
 class Manifest(ToolMeta, total=False):
