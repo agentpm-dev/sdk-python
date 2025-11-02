@@ -29,8 +29,19 @@ class Entrypoint(TypedDict, total=False):
     env: dict[str, str]
 
 
+class EnvVar(TypedDict, total=False):
+    required: bool
+    description: str
+    default: str | None
+
+
+class Environment(TypedDict, total=False):
+    vars: dict[str, EnvVar]
+
+
 class Manifest(ToolMeta, total=False):
     entrypoint: Entrypoint
+    environment: Environment
 
 
 ToolFunc = Callable[[JsonValue], JsonValue]
