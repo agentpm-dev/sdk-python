@@ -5,10 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "agentpm"
 version = "0.1.2"
-description = "AgentPM Python SDK"
+description = "AgentPM™ Python SDK"
 readme = "README.md"
 license = { file = "LICENSE" }
-authors = [{ name = "AgentPM", email = "dev@agentpm.dev" }]
+authors = [{ name = "AgentPM™", email = "dev@agentpm.dev" }]
 requires-python = ">=3.10"
 keywords = ["agentpm", "ai", "tools", "agents"]
 classifiers = [

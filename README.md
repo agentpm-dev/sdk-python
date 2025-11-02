@@ -1,4 +1,4 @@
-# AgentPM Python SDK
+# AgentPM™ Python SDK
 
 A lean, typed Python SDK for **AgentPM** tools. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and returns JSON results you can pass to your agents.
 
