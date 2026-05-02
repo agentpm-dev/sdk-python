@@ -96,6 +96,8 @@ Example:
   Do keep adapter-specific logic isolated and package metadata explicit.
 - Don’t change exported imports or typed structures casually.
   Do treat import behavior, `types.py`, and `py.typed` as part of the public package contract.
+- Don’t change Python packaging metadata casually.
+  Do treat extras, build metadata, and typed-package signals as part of the public package contract.
 - Don’t let README examples drift from the actual SDK usage model.
   Do update usage docs when imports, options, or calling conventions change.
 - Don’t casually change stdout parsing behavior.
