@@ -100,7 +100,7 @@ def _resolve_interpreter_command(
 
 def _assert_allowed_interpreter(cmd: str) -> None:
     canon = _canonical(cmd)
-    if canon not in _ALLOWED and not canon.startswith("pyhton3"):
+    if canon not in _ALLOWED and not canon.startswith("python3"):
         raise ValueError(
             f'Unsupported agent.json.entrypoint.command "{cmd}". Allowed: node|nodejs|python|python3'
         )

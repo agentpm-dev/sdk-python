@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__all__ = ["load", "to_langchain_tool", "__version__"]
+__all__ = ["__version__", "load", "to_langchain_tool"]
 
 # Real exports
 from importlib.metadata import PackageNotFoundError, version
