@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-__all__ = ["__version__", "load", "to_langchain_tool"]
+__all__ = ["__version__", "load", "load_agent", "to_langchain_tool"]
 
 # Real exports
 from importlib.metadata import PackageNotFoundError, version
 
-from .core import load
+from .core import load, load_agent
 
 try:
     __version__ = version("agentpm")

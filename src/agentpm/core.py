@@ -22,7 +22,20 @@ from typing import Any, Literal, cast, overload
 from semver import VersionInfo
 from semver import match as semver_match
 
-from .types import Entrypoint, JsonValue, LoadedWithMeta, Manifest, Runtime, ToolFunc, ToolMeta
+from .types import (
+    AgentMeta,
+    DependencyReference,
+    Entrypoint,
+    JsonValue,
+    LoadedAgent,
+    LoadedWithMeta,
+    Manifest,
+    ReservedReferences,
+    ResolvedAgentToolRef,
+    Runtime,
+    ToolFunc,
+    ToolMeta,
+)
 
 READ_CHUNK = 65536
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap across stdout+stderr
@@ -353,12 +366,124 @@ def _resolve_tool_root(spec: str, tool_dir_override: str | None) -> tuple[Path, 
     )
 
 
+def _resolve_agent_root(spec: str, agent_dir_override: str | None) -> tuple[Path, Path]:
+    at = spec.rfind("@")
+    if at <= 0 or at == len(spec) - 1:
+        raise ValueError(f'Invalid agent spec "{spec}". Expected "@scope/name@version".')
+
+    selector = spec[at + 1 :].strip()
+    name = spec[:at]
+
+    project_root = find_project_root(Path.cwd())
+
+    candidates: list[Path] = []
+    if agent_dir_override:
+        candidates.append(Path(agent_dir_override))
+
+    env_dir = os.getenv("AGENTPM_AGENT_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "agents")
+    candidates.append(Path.home() / ".agentpm" / "agents")
+
+    try:
+        if selector and selector.lower() != "latest":
+            VersionInfo.parse(selector)
+            for base in candidates:
+                hit = _find_installed(base, name, selector)
+                if hit:
+                    return hit
+            raise FileNotFoundError(f'Agent "{spec}" not found in .agentpm/agents (or overrides).')
+    except ValueError:
+        pass
+
+    want_latest = (not selector) or (selector.lower() == "latest")
+
+    for base in candidates:
+        installed = _list_installed_versions(base, name)
+        if not installed:
+            continue
+
+        if want_latest:
+            picked = installed[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+            continue
+
+        satisfying = [v for v in installed if _version_satisfies(v, selector)]
+        if satisfying:
+            picked = sorted(satisfying, key=VersionInfo.parse, reverse=True)[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f'No installed version of "{name}" matches "{selector or "latest"}". Searched: {searched}'
+    )
+
+
 def _read_manifest(p: Path) -> Manifest:
     m = json.loads(p.read_text(encoding="utf-8"))
     ep = m.get("entrypoint", {})
     if not ep or not ep.get("command"):
         raise ValueError(f"agent.json missing entrypoint.command at: {p}")
     return m  # type: ignore[no-any-return]
+
+
+def _read_agent_manifest(p: Path) -> AgentMeta:
+    manifest = cast(AgentMeta, json.loads(p.read_text(encoding="utf-8")))
+    if manifest.get("kind") != "agent":
+        raise ValueError(f"agent.json is not an agent manifest at: {p}")
+    return manifest
+
+
+def _read_lockfile_v2(lockfile_path: Path) -> dict[str, Any]:
+    lock = cast(dict[str, Any], json.loads(lockfile_path.read_text(encoding="utf-8")))
+    if lock.get("lockfile_version") != 2:
+        raise ValueError(
+            f'Unsupported lockfile version at {lockfile_path}; expected agent.lock v2. Run "agentpm install" to regenerate the lockfile.'
+        )
+    return lock
+
+
+def _resolve_agent_lockfile_path(lockfile_override: str | None) -> Path:
+    if lockfile_override:
+        return Path(lockfile_override)
+    return find_project_root(Path.cwd()) / "agent.lock"
+
+
+def _empty_reserved_references() -> ReservedReferences:
+    return {
+        "skills": [],
+        "knowledge": [],
+        "memory": [],
+        "profiles": [],
+    }
+
+
+def _resolve_tool_installed_path(
+    name: str, version: str, tool_dir_override: str | None
+) -> tuple[Path, Path] | None:
+    project_root = find_project_root(Path.cwd())
+    candidates: list[Path] = []
+    if tool_dir_override:
+        candidates.append(Path(tool_dir_override))
+
+    env_dir = os.getenv("AGENTPM_TOOL_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "tools")
+    candidates.append(Path.home() / ".agentpm" / "tools")
+
+    for base in candidates:
+        hit = _find_installed(base, name, version)
+        if hit:
+            return hit
+    return None
 
 
 def _build_env(
@@ -801,3 +926,64 @@ def load(
         return {"func": func, "meta": meta}
 
     return func
+
+
+def load_agent(
+    spec: str,
+    *,
+    agent_dir_override: str | None = None,
+    tool_dir_override: str | None = None,
+    lockfile_override: str | None = None,
+) -> LoadedAgent:
+    root, manifest_path = _resolve_agent_root(spec, agent_dir_override)
+    manifest = _read_agent_manifest(manifest_path)
+
+    lockfile_path = _resolve_agent_lockfile_path(lockfile_override)
+    if not lockfile_path.exists():
+        raise FileNotFoundError(
+            f'agent.lock not found at {lockfile_path}; installed agent metadata requires a lockfile v2. Run "agentpm install" to generate the lockfile.'
+        )
+
+    lock = _read_lockfile_v2(lockfile_path)
+    package_key = f'agent:{manifest["name"]}@{manifest["version"]}'
+    roots = cast(dict[str, Any], lock.get("roots") or {})
+    root_entry = cast(dict[str, Any] | None, roots.get(package_key))
+    if root_entry is None:
+        raise ValueError(
+            f'Agent root "{package_key}" not found in {lockfile_path}; install the agent with agentpm install first.'
+        )
+
+    reserved = _empty_reserved_references()
+    root_reserved = cast(dict[str, list[DependencyReference]], root_entry.get("reserved") or {})
+    for key in ("skills", "knowledge", "memory", "profiles"):
+        reserved[key] = list(root_reserved.get(key, []))  # type: ignore[literal-required]
+
+    packages = cast(dict[str, dict[str, Any]], lock.get("packages") or {})
+    resolved_tools: list[ResolvedAgentToolRef] = []
+    for tool_key in cast(list[str], root_entry.get("tools") or []):
+        pkg = packages.get(tool_key)
+        if not pkg or pkg.get("kind") != "tool":
+            continue
+
+        installed = _resolve_tool_installed_path(
+            cast(str, pkg["name"]), cast(str, pkg["version"]), tool_dir_override
+        )
+        resolved_tools.append(
+            {
+                "packageKey": tool_key,
+                "kind": "tool",
+                "name": cast(str, pkg["name"]),
+                "version": cast(str, pkg["version"]),
+                "integrity": cast(str, pkg["integrity"]),
+                "root": str(installed[0]) if installed else None,
+                "manifestPath": str(installed[1]) if installed else None,
+            }
+        )
+
+    return {
+        "root": str(root),
+        "manifestPath": str(manifest_path),
+        "manifest": manifest,
+        "resolvedTools": resolved_tools,
+        "reserved": reserved,
+    }
