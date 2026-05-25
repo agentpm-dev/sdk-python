@@ -1,8 +1,9 @@
 # AgentPM™ Python SDK
 
-A lean, typed Python SDK for **AgentPM** tools. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and returns JSON results you can pass to your agents.
+A lean, typed Python SDK for **AgentPM** tools and installed agent packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved tool refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
+- 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool refs from `agent.lock`.
 - 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
@@ -83,6 +84,31 @@ print(rich_description)
 print(summarize({"text": "hello"})["summary"])
 ```
 
+### Load an installed agent package
+
+```python
+from agentpm import load, load_agent
+
+agent = load_agent("@zack/support-agent@0.1.0")
+first_tool = agent["resolvedTools"][0]
+tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
+```
+
+`load_agent()` returns:
+
+- the installed agent manifest
+- the installed agent root path
+- reserved refs (`skills`, `knowledge`, `memory`, `profiles`) as metadata
+- `resolvedTools` from `agent.lock` v2
+
+It does **not** execute the agent package or orchestrate the tools for you.
+
+This is the Python mirror of the Node SDK’s `loadAgent()` flow:
+
+1. load the installed agent package
+2. read its resolved tool refs
+3. choose which tool packages to `load()`
+
 ### Optional: LangChain adapter
 The adapter is lazy-imported and only needed if you call it.
 
@@ -118,6 +144,31 @@ Each tool lives in a directory like:
       0.1.0/
         agent.json
         (tool files…)
+```
+
+Installed registry agent packages live separately:
+
+```
+.agentpm/
+  agents/
+    @zack/support-agent/
+      0.1.0/
+        agent.json
+        README.md
+```
+
+## Where installed agents are discovered
+
+Resolution order for `load_agent()`:
+
+1. `AGENTPM_AGENT_DIR` (environment variable)
+2. `./.agentpm/agents` (project-local)
+3. `~/.agentpm/agents` (user-local)
+
+You can also override per call:
+
+```python
+load_agent("@zack/support-agent@0.1.0", agent_dir_override="/path/to/agents")
 ```
 
 ---

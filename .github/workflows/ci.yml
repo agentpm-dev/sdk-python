@@ -46,9 +46,9 @@ jobs:
 
       - name: Smoke test the wheel (import)
         run: |
-          uv venv --seed
-          uv pip install dist/*.whl
-          uv run python - <<'PY'
+          uv venv .smoke-venv --seed
+          .smoke-venv/bin/python -m pip install dist/*.whl
+          .smoke-venv/bin/python - <<'PY'
           import importlib.metadata
           print("agentpm version:", importlib.metadata.version("agentpm"))
           import agentpm  # noqa: F401
