@@ -937,6 +937,10 @@ def load_agent(
 ) -> LoadedAgent:
     root, manifest_path = _resolve_agent_root(spec, agent_dir_override)
     manifest = _read_agent_manifest(manifest_path)
+    at = spec.rfind("@")
+    if at <= 0 or at == len(spec) - 1:
+        raise ValueError(f'Invalid agent spec "{spec}". Expected "@scope/name@version".')
+    package_name = spec[:at]
 
     lockfile_path = _resolve_agent_lockfile_path(lockfile_override)
     if not lockfile_path.exists():
@@ -945,7 +949,7 @@ def load_agent(
         )
 
     lock = _read_lockfile_v2(lockfile_path)
-    package_key = f'agent:{manifest["name"]}@{manifest["version"]}'
+    package_key = f'agent:{package_name}@{manifest["version"]}'
     roots = cast(dict[str, Any], lock.get("roots") or {})
     root_entry = cast(dict[str, Any] | None, roots.get(package_key))
     if root_entry is None:
