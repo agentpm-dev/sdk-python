@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentpm import load_agent
+from agentpm.core import find_project_root
 
 
 def _split_spec(spec: str) -> tuple[str, str]:
@@ -359,3 +360,14 @@ def test_load_agent_returns_metadata_when_resolved_tool_is_missing_on_disk(
             "manifestPath": None,
         }
     ]
+
+
+def test_find_project_root_prefers_pyproject_for_python_apps(tmp_agent_workspace: Path) -> None:
+    app_root = tmp_agent_workspace / "python-app"
+    nested = app_root / "app"
+    nested.mkdir(parents=True, exist_ok=True)
+    (app_root / "pyproject.toml").write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    (tmp_agent_workspace / ".git").mkdir(exist_ok=True)
+
+    resolved = find_project_root(nested)
+    assert resolved == app_root.resolve()

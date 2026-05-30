@@ -218,12 +218,14 @@ def _find_installed(base: Path, name: str, version: str) -> tuple[Path, Path] | 
 def find_project_root(start_dir: str | Path) -> Path:
     """
     Walk up from start_dir looking for project markers.
-    Priority: agent.json, package.json, pnpm-workspace.yaml, turbo.json, lerna.json, .git
+    Priority: agent.json, pyproject.toml, package.json, pnpm-workspace.yaml, turbo.json, lerna.json, .git
     Returns the resolved start_dir if nothing is found.
     """
     dir_path = Path(start_dir).resolve()
     while True:
         if (dir_path / "agent.json").exists():
+            return dir_path
+        if (dir_path / "pyproject.toml").exists():
             return dir_path
         if (dir_path / "package.json").exists():
             return dir_path
