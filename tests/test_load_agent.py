@@ -40,14 +40,15 @@ def _write_installed_tool(base_dir: Path, spec: str) -> None:
 def _write_installed_agent(
     base_dir: Path, spec: str, skill_ref: str = "@zack/triage-skill@0.1.0"
 ) -> None:
-    name, version = _split_spec(spec)
-    root = base_dir / name / version
+    package_name, version = _split_spec(spec)
+    root = base_dir / package_name / version
+    manifest_name = package_name.split("/", 1)[1]
     root.mkdir(parents=True, exist_ok=True)
     (root / "agent.json").write_text(
         json.dumps(
             {
                 "kind": "agent",
-                "name": name,
+                "name": manifest_name,
                 "version": version,
                 "description": "Installed agent fixture",
                 "tools": ["@zack/capitalize@0.1.0"],
@@ -124,7 +125,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools(tmp_agent_workspace
     )
 
     assert loaded["manifest"]["kind"] == "agent"
-    assert loaded["manifest"]["name"] == "@zack/support-agent"
+    assert loaded["manifest"]["name"] == "support-agent"
     assert ".agentpm/agents" in loaded["root"]
     assert loaded["reserved"]["skills"] == ["@zack/triage-skill@0.1.0"]
     assert loaded["resolvedTools"] == [
