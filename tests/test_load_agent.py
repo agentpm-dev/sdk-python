@@ -38,9 +38,29 @@ def _write_installed_tool(base_dir: Path, spec: str) -> None:
     )
 
 
-def _write_installed_agent(
-    base_dir: Path, spec: str, skill_ref: str = "@zack/triage-skill@0.1.0"
-) -> None:
+def _write_installed_skill(base_dir: Path, spec: str) -> None:
+    package_name, version = _split_spec(spec)
+    root = base_dir / package_name / version
+    manifest_name = package_name.split("/", 1)[1]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text("# Triage playbook\n\nUse the checklist.\n", encoding="utf-8")
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "skill",
+                "name": manifest_name,
+                "version": version,
+                "description": "Installed skill fixture",
+                "tools": ["@zack/capitalize@0.1.0"],
+                "skill": {"entrypoint": "SKILL.md"},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_installed_agent(base_dir: Path, spec: str, skill_ref: str) -> None:
     package_name, version = _split_spec(spec)
     root = base_dir / package_name / version
     manifest_name = package_name.split("/", 1)[1]
@@ -74,18 +94,22 @@ def tmp_agent_workspace() -> Iterator[Path]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_load_agent_loads_installed_agent_and_resolved_tools(tmp_agent_workspace: Path) -> None:
+def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
+    tmp_agent_workspace: Path,
+) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     lockfile_path = tmp_agent_workspace / "agent.lock"
     agent_spec = "@zack/support-agent@0.1.0"
 
     _write_installed_tool(tools_dir, "@zack/capitalize@0.1.0")
-    _write_installed_agent(agents_dir, agent_spec)
+    _write_installed_skill(skills_dir, "@zack/triage-skill@0.1.0")
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
     lockfile_path.write_text(
         json.dumps(
             {
-                "lockfile_version": 2,
+                "lockfile_version": 3,
                 "generated": "2026-05-23T00:00:00Z",
                 "packages": {
                     "agent:@zack/support-agent@0.1.0": {
@@ -100,12 +124,18 @@ def test_load_agent_loads_installed_agent_and_resolved_tools(tmp_agent_workspace
                         "version": "0.1.0",
                         "integrity": "sha256-tool",
                     },
+                    "skill:@zack/triage-skill@0.1.0": {
+                        "kind": "skill",
+                        "name": "@zack/triage-skill",
+                        "version": "0.1.0",
+                        "integrity": "sha256-skill",
+                    },
                 },
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
                         "tools": ["tool:@zack/capitalize@0.1.0"],
+                        "skills": ["skill:@zack/triage-skill@0.1.0"],
                         "reserved": {
-                            "skills": ["@zack/triage-skill@0.1.0"],
                             "knowledge": [],
                             "memory": [],
                             "profiles": [],
@@ -121,6 +151,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools(tmp_agent_workspace
     loaded = load_agent(
         agent_spec,
         agent_dir_override=str(agents_dir),
+        skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
         lockfile_override=str(lockfile_path),
     )
@@ -128,7 +159,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools(tmp_agent_workspace
     assert loaded["manifest"]["kind"] == "agent"
     assert loaded["manifest"]["name"] == "support-agent"
     assert ".agentpm/agents" in loaded["root"]
-    assert loaded["reserved"]["skills"] == ["@zack/triage-skill@0.1.0"]
+    assert loaded["reserved"]["skills"] == []
     assert loaded["resolvedTools"] == [
         {
             "packageKey": "tool:@zack/capitalize@0.1.0",
@@ -142,22 +173,35 @@ def test_load_agent_loads_installed_agent_and_resolved_tools(tmp_agent_workspace
             ),
         }
     ]
+    assert loaded["resolvedSkills"] == [
+        {
+            "packageKey": "skill:@zack/triage-skill@0.1.0",
+            "kind": "skill",
+            "name": "@zack/triage-skill",
+            "version": "0.1.0",
+            "integrity": "sha256-skill",
+            "root": str(skills_dir / "@zack" / "triage-skill" / "0.1.0"),
+            "manifestPath": str(skills_dir / "@zack" / "triage-skill" / "0.1.0" / "agent.json"),
+        }
+    ]
 
 
 def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     lockfile_path = tmp_agent_workspace / "agent-range.lock"
     exact_spec = "@zack/support-agent@0.1.0"
     newer_spec = "@zack/support-agent@0.2.0"
 
     _write_installed_tool(tools_dir, "@zack/capitalize@0.1.0")
+    _write_installed_skill(skills_dir, "@zack/triage-skill@0.2.0")
     _write_installed_agent(agents_dir, exact_spec, "@zack/triage-skill@0.1.0")
     _write_installed_agent(agents_dir, newer_spec, "@zack/triage-skill@0.2.0")
     lockfile_path.write_text(
         json.dumps(
             {
-                "lockfile_version": 2,
+                "lockfile_version": 3,
                 "generated": "2026-05-23T00:00:00Z",
                 "packages": {
                     "agent:@zack/support-agent@0.1.0": {
@@ -178,12 +222,18 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
                         "version": "0.1.0",
                         "integrity": "sha256-tool",
                     },
+                    "skill:@zack/triage-skill@0.2.0": {
+                        "kind": "skill",
+                        "name": "@zack/triage-skill",
+                        "version": "0.2.0",
+                        "integrity": "sha256-skill-2",
+                    },
                 },
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
                         "tools": ["tool:@zack/capitalize@0.1.0"],
+                        "skills": [],
                         "reserved": {
-                            "skills": ["@zack/triage-skill@0.1.0"],
                             "knowledge": [],
                             "memory": [],
                             "profiles": [],
@@ -191,8 +241,8 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
                     },
                     "agent:@zack/support-agent@0.2.0": {
                         "tools": ["tool:@zack/capitalize@0.1.0"],
+                        "skills": ["skill:@zack/triage-skill@0.2.0"],
                         "reserved": {
-                            "skills": ["@zack/triage-skill@0.2.0"],
                             "knowledge": [],
                             "memory": [],
                             "profiles": [],
@@ -208,33 +258,37 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
     latest = load_agent(
         "@zack/support-agent@latest",
         agent_dir_override=str(agents_dir),
+        skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
         lockfile_override=str(lockfile_path),
     )
     ranged = load_agent(
         "@zack/support-agent@>=0.1.0 <0.3.0",
         agent_dir_override=str(agents_dir),
+        skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
         lockfile_override=str(lockfile_path),
     )
 
     assert latest["manifest"]["version"] == "0.2.0"
-    assert latest["reserved"]["skills"] == ["@zack/triage-skill@0.2.0"]
+    assert latest["resolvedSkills"][0]["version"] == "0.2.0"
     assert ranged["manifest"]["version"] == "0.2.0"
-    assert ranged["reserved"]["skills"] == ["@zack/triage-skill@0.2.0"]
+    assert ranged["resolvedSkills"][0]["version"] == "0.2.0"
 
 
 def test_load_agent_fails_when_lockfile_is_missing(tmp_agent_workspace: Path) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     agent_spec = "@zack/support-agent@0.1.0"
-    _write_installed_agent(agents_dir, agent_spec)
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
 
     missing_lock_path = tmp_agent_workspace / "missing-agent.lock"
     with pytest.raises(FileNotFoundError, match="agentpm install"):
         load_agent(
             agent_spec,
             agent_dir_override=str(agents_dir),
+            skill_dir_override=str(skills_dir),
             tool_dir_override=str(tools_dir),
             lockfile_override=str(missing_lock_path),
         )
@@ -243,8 +297,9 @@ def test_load_agent_fails_when_lockfile_is_missing(tmp_agent_workspace: Path) ->
 def test_load_agent_fails_when_lockfile_is_v1(tmp_agent_workspace: Path) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     agent_spec = "@zack/support-agent@0.1.0"
-    _write_installed_agent(agents_dir, agent_spec)
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
 
     v1_lockfile_path = tmp_agent_workspace / "agent-v1.lock"
     v1_lockfile_path.write_text(
@@ -257,6 +312,7 @@ def test_load_agent_fails_when_lockfile_is_v1(tmp_agent_workspace: Path) -> None
         load_agent(
             agent_spec,
             agent_dir_override=str(agents_dir),
+            skill_dir_override=str(skills_dir),
             tool_dir_override=str(tools_dir),
             lockfile_override=str(v1_lockfile_path),
         )
@@ -267,14 +323,15 @@ def test_load_agent_fails_when_agent_root_is_missing_from_lockfile(
 ) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     agent_spec = "@zack/support-agent@0.1.0"
-    _write_installed_agent(agents_dir, agent_spec)
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
 
     wrong_root_lockfile_path = tmp_agent_workspace / "agent-missing-root.lock"
     wrong_root_lockfile_path.write_text(
         json.dumps(
             {
-                "lockfile_version": 2,
+                "lockfile_version": 3,
                 "generated": "2026-05-23T00:00:00Z",
                 "packages": {
                     "agent:@zack/support-agent@0.1.0": {
@@ -294,6 +351,7 @@ def test_load_agent_fails_when_agent_root_is_missing_from_lockfile(
         load_agent(
             agent_spec,
             agent_dir_override=str(agents_dir),
+            skill_dir_override=str(skills_dir),
             tool_dir_override=str(tools_dir),
             lockfile_override=str(wrong_root_lockfile_path),
         )
@@ -304,14 +362,15 @@ def test_load_agent_returns_metadata_when_resolved_tool_is_missing_on_disk(
 ) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     agent_spec = "@zack/support-agent@0.1.0"
-    _write_installed_agent(agents_dir, agent_spec)
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
 
     missing_tool_lockfile_path = tmp_agent_workspace / "agent-missing-tool.lock"
     missing_tool_lockfile_path.write_text(
         json.dumps(
             {
-                "lockfile_version": 2,
+                "lockfile_version": 3,
                 "generated": "2026-05-23T00:00:00Z",
                 "packages": {
                     "agent:@zack/support-agent@0.1.0": {
@@ -330,8 +389,8 @@ def test_load_agent_returns_metadata_when_resolved_tool_is_missing_on_disk(
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
                         "tools": ["tool:@zack/missing-tool@0.9.0"],
+                        "skills": [],
                         "reserved": {
-                            "skills": [],
                             "knowledge": [],
                             "memory": [],
                             "profiles": [],
@@ -346,6 +405,7 @@ def test_load_agent_returns_metadata_when_resolved_tool_is_missing_on_disk(
     loaded = load_agent(
         agent_spec,
         agent_dir_override=str(agents_dir),
+        skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
         lockfile_override=str(missing_tool_lockfile_path),
     )

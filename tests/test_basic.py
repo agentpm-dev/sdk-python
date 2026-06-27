@@ -288,3 +288,42 @@ def test_missing_env_variables_raises(tmp_tools_dir: Path) -> None:
     with pytest.raises(Exception) as ei:
         load(with_env_spec, tool_dir_override=str(tmp_tools_dir))
     assert "Missing environment variable: OPENAI_API_KEY" in str(ei.value)
+
+
+def test_load_rejects_installed_skill_specs(tmp_tools_dir: Path) -> None:
+    skill_dir = tmp_tools_dir / "skills"
+    skill_spec = "@zack/triage-playbook@0.1.0"
+    name, version = _split_spec(skill_spec)
+    root = skill_dir / name / version
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text("# Playbook\n", encoding="utf-8")
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "skill",
+                "name": name,
+                "version": version,
+                "description": "Skill fixture",
+                "tools": [],
+                "skill": {"entrypoint": "SKILL.md"},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        import os
+
+        os.environ["AGENTPM_SKILL_DIR"] = str(skill_dir)
+        with pytest.raises(ValueError, match="load_skill"):
+            load(skill_spec, tool_dir_override=str(tmp_tools_dir))
+    finally:
+        import os
+
+        os.environ.pop("AGENTPM_SKILL_DIR", None)
+
+
+def test_load_missing_skill_like_spec_suggests_load_skill(tmp_tools_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="load_skill"):
+        load("@zack/missing-skill@0.1.0", tool_dir_override=str(tmp_tools_dir))
