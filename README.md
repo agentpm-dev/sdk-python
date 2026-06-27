@@ -3,7 +3,8 @@
 A lean, typed Python SDK for **AgentPM** tools and installed agent packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved tool refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
-- 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool refs from `agent.lock`.
+- 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool and skill refs from `agent.lock`.
+- 📚 **Loads installed skills** from `.agentpm/skills` and exposes their manual content plus resolved tool refs.
 - 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
@@ -100,7 +101,7 @@ tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
 
 - the installed agent manifest
 - the installed agent root path
-- reserved refs (`skills`, `knowledge`, `memory`, `profiles`) as metadata
+- reserved refs (`knowledge`, `memory`, `profiles`) as metadata
 - `resolvedTools` from `agent.lock`
 - `resolvedSkills` from `agent.lock`
 
@@ -109,8 +110,9 @@ It does **not** execute the agent package or orchestrate the tools for you.
 This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 
 1. load the installed agent package
-2. read its resolved tool refs
-3. choose which tool packages to `load()`
+2. read its resolved skill and tool refs
+3. optionally load a resolved skill package
+4. choose which tool packages to `load()`
 
 ### Load an installed skill package
 
@@ -271,7 +273,7 @@ The SDK validates the interpreter and checks it’s present on `PATH`.
 ```
 src/
   agentpm/
-    __init__.py           # re-exports: load, to_langchain_tool (lazy)
+    __init__.py           # re-exports: load, load_agent, load_skill, to_langchain_tool (lazy)
     core.py               # resolver/spawn/JSON plumbing
     types.py              # JsonValue, TypedDicts
     adapters/
@@ -280,6 +282,8 @@ src/
     py.typed              # marks package as typed
 tests/
   test_basic.py
+  test_load_agent.py
+  test_load_skill.py
 ```
 
 ### Common tasks (via `uv`)
