@@ -159,7 +159,6 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
     assert loaded["manifest"]["kind"] == "agent"
     assert loaded["manifest"]["name"] == "support-agent"
     assert ".agentpm/agents" in loaded["root"]
-    assert loaded["reserved"]["skills"] == []
     assert loaded["resolvedTools"] == [
         {
             "packageKey": "tool:@zack/capitalize@0.1.0",
@@ -274,6 +273,70 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
     assert latest["resolvedSkills"][0]["version"] == "0.2.0"
     assert ranged["manifest"]["version"] == "0.2.0"
     assert ranged["resolvedSkills"][0]["version"] == "0.2.0"
+
+
+def test_load_agent_ignores_legacy_reserved_skills_entries(
+    tmp_agent_workspace: Path,
+) -> None:
+    tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
+    agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
+    lockfile_path = tmp_agent_workspace / "agent-legacy.lock"
+    agent_spec = "@zack/support-agent@0.1.0"
+
+    _write_installed_tool(tools_dir, "@zack/capitalize@0.1.0")
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
+    lockfile_path.write_text(
+        json.dumps(
+            {
+                "lockfile_version": 2,
+                "generated": "2026-05-23T00:00:00Z",
+                "packages": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "kind": "agent",
+                        "name": "@zack/support-agent",
+                        "version": "0.1.0",
+                        "integrity": "sha256-agent",
+                    },
+                    "tool:@zack/capitalize@0.1.0": {
+                        "kind": "tool",
+                        "name": "@zack/capitalize",
+                        "version": "0.1.0",
+                        "integrity": "sha256-tool",
+                    },
+                },
+                "roots": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "tools": ["tool:@zack/capitalize@0.1.0"],
+                        "reserved": {
+                            "skills": ["skill:@zack/legacy-skill@0.1.0"],
+                            "knowledge": [],
+                            "memory": [],
+                            "profiles": [],
+                        },
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_agent(
+        agent_spec,
+        agent_dir_override=str(agents_dir),
+        skill_dir_override=str(skills_dir),
+        tool_dir_override=str(tools_dir),
+        lockfile_override=str(lockfile_path),
+    )
+
+    assert loaded["reserved"] == {
+        "knowledge": [],
+        "memory": [],
+        "profiles": [],
+    }
+    assert "skills" not in loaded["reserved"]
+    assert loaded["resolvedSkills"] == []
 
 
 def test_load_agent_fails_when_lockfile_is_missing(tmp_agent_workspace: Path) -> None:

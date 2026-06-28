@@ -533,7 +533,6 @@ def _resolve_agent_lockfile_path(lockfile_override: str | None) -> Path:
 
 def _empty_reserved_references() -> ReservedReferences:
     return {
-        "skills": [],
         "knowledge": [],
         "memory": [],
         "profiles": [],
@@ -1075,7 +1074,7 @@ def load_agent(
 
     reserved = _empty_reserved_references()
     root_reserved = cast(dict[str, list[DependencyReference]], root_entry.get("reserved") or {})
-    for key in ("skills", "knowledge", "memory", "profiles"):
+    for key in ("knowledge", "memory", "profiles"):
         reserved[key] = list(root_reserved.get(key, []))  # type: ignore[literal-required]
 
     packages = cast(dict[str, dict[str, Any]], lock.get("packages") or {})

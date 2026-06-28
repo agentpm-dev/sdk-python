@@ -97,7 +97,6 @@ class SkillMeta(TypedDict, total=False):
 
 
 class ReservedReferences(TypedDict):
-    skills: list[DependencyReference]
     knowledge: list[DependencyReference]
     memory: list[DependencyReference]
     profiles: list[DependencyReference]
