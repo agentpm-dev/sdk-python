@@ -3,7 +3,8 @@
 A lean, typed Python SDK for **AgentPM** tools and installed agent packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved tool refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
-- 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool refs from `agent.lock`.
+- 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool and skill refs from `agent.lock`.
+- 📚 **Loads installed skills** from `.agentpm/skills` and exposes their manual content plus resolved tool refs.
 - 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
@@ -87,10 +88,12 @@ print(summarize({"text": "hello"})["summary"])
 ### Load an installed agent package
 
 ```python
-from agentpm import load, load_agent
+from agentpm import load, load_agent, load_skill
 
 agent = load_agent("@zack/support-agent@0.1.0")
-first_tool = agent["resolvedTools"][0]
+first_skill = agent["resolvedSkills"][0]
+skill = load_skill(f'{first_skill["name"]}@{first_skill["version"]}')
+first_tool = skill["resolvedTools"][0]
 tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
 ```
 
@@ -98,16 +101,43 @@ tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
 
 - the installed agent manifest
 - the installed agent root path
-- reserved refs (`skills`, `knowledge`, `memory`, `profiles`) as metadata
-- `resolvedTools` from `agent.lock` v2
+- reserved refs (`knowledge`, `memory`, `profiles`) as metadata
+- `resolvedTools` from `agent.lock`
+- `resolvedSkills` from `agent.lock`
 
 It does **not** execute the agent package or orchestrate the tools for you.
 
 This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 
 1. load the installed agent package
-2. read its resolved tool refs
-3. choose which tool packages to `load()`
+2. read its resolved skill and tool refs
+3. optionally load a resolved skill package
+4. choose which tool packages to `load()`
+
+### Load an installed skill package
+
+```python
+from agentpm import load_skill
+
+skill = load_skill("@zack/triage-playbook@0.1.0")
+
+print(skill["entrypointPath"])
+print(skill["entrypointContent"])
+print(skill["references"])
+print(skill["scripts"])
+print(skill["resolvedTools"])
+```
+
+`load_skill()` returns an inspectable Skill object. Skills are **not** runnable SDK objects.
+
+### `load()` stays tool-only
+
+```python
+from agentpm import load
+
+load("@zack/triage-playbook@0.1.0")
+# raises: use load_skill("@zack/triage-playbook@0.1.0") instead
+```
 
 ### Optional: LangChain adapter
 The adapter is lazy-imported and only needed if you call it.
@@ -157,6 +187,17 @@ Installed registry agent packages live separately:
         README.md
 ```
 
+Installed registry skill packages live separately:
+
+```
+.agentpm/
+  skills/
+    @zack/triage-playbook/
+      0.1.0/
+        agent.json
+        SKILL.md
+```
+
 ## Where installed agents are discovered
 
 Resolution order for `load_agent()`:
@@ -169,6 +210,20 @@ You can also override per call:
 
 ```python
 load_agent("@zack/support-agent@0.1.0", agent_dir_override="/path/to/agents")
+```
+
+## Where installed skills are discovered
+
+Resolution order for `load_skill()`:
+
+1. `AGENTPM_SKILL_DIR` (environment variable)
+2. `./.agentpm/skills` (project-local)
+3. `~/.agentpm/skills` (user-local)
+
+You can also override per call:
+
+```python
+load_skill("@zack/triage-playbook@0.1.0", skill_dir_override="/path/to/skills")
 ```
 
 ---
@@ -218,7 +273,7 @@ The SDK validates the interpreter and checks it’s present on `PATH`.
 ```
 src/
   agentpm/
-    __init__.py           # re-exports: load, to_langchain_tool (lazy)
+    __init__.py           # re-exports: load, load_agent, load_skill, to_langchain_tool (lazy)
     core.py               # resolver/spawn/JSON plumbing
     types.py              # JsonValue, TypedDicts
     adapters/
@@ -227,6 +282,8 @@ src/
     py.typed              # marks package as typed
 tests/
   test_basic.py
+  test_load_agent.py
+  test_load_skill.py
 ```
 
 ### Common tasks (via `uv`)

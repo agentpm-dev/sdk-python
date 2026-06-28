@@ -73,8 +73,30 @@ class AgentMeta(TypedDict, total=False):
     profiles: NotRequired[list[DependencyReference]]
 
 
+class SkillCompatibility(TypedDict, total=False):
+    model_families: list[str]
+    runtimes: list[str]
+    environments: list[str]
+    export_targets: list[str]
+
+
+class SkillMetadata(TypedDict, total=False):
+    entrypoint: Required[str]
+    references: NotRequired[list[str]]
+    scripts: NotRequired[list[str]]
+    compatibility: NotRequired[SkillCompatibility]
+
+
+class SkillMeta(TypedDict, total=False):
+    kind: Required[Literal["skill"]]
+    name: Required[str]
+    version: Required[str]
+    description: NotRequired[str]
+    tools: NotRequired[list[DependencyReference]]
+    skill: Required[SkillMetadata]
+
+
 class ReservedReferences(TypedDict):
-    skills: list[DependencyReference]
     knowledge: list[DependencyReference]
     memory: list[DependencyReference]
     profiles: list[DependencyReference]
@@ -90,9 +112,36 @@ class ResolvedAgentToolRef(TypedDict):
     manifestPath: str | None
 
 
+class ResolvedAgentSkillRef(TypedDict):
+    packageKey: str
+    kind: Literal["skill"]
+    name: str
+    version: str
+    integrity: str
+    root: str | None
+    manifestPath: str | None
+
+
 class LoadedAgent(TypedDict):
     root: str
     manifestPath: str
     manifest: AgentMeta
     resolvedTools: list[ResolvedAgentToolRef]
+    resolvedSkills: list[ResolvedAgentSkillRef]
     reserved: ReservedReferences
+
+
+class LoadedSkill(TypedDict):
+    kind: Literal["skill"]
+    name: str
+    version: str
+    description: str | None
+    root: str
+    manifestPath: str
+    manifest: SkillMeta
+    skill: SkillMetadata
+    entrypointPath: str
+    entrypointContent: str
+    references: list[str]
+    scripts: list[str]
+    resolvedTools: list[ResolvedAgentToolRef]
