@@ -1130,6 +1130,103 @@ def load_agent(
     }
 
 
+def _resolved_tools_from_lock_keys(
+    tool_keys: list[str],
+    packages: dict[str, dict[str, Any]],
+    tool_dir_override: str | None,
+) -> list[ResolvedAgentToolRef]:
+    resolved_tools: list[ResolvedAgentToolRef] = []
+    for tool_key in tool_keys:
+        pkg = packages.get(tool_key)
+        if not pkg or pkg.get("kind") != "tool":
+            continue
+
+        installed = _resolve_tool_installed_path(
+            cast(str, pkg["name"]), cast(str, pkg["version"]), tool_dir_override
+        )
+        resolved_tools.append(
+            {
+                "packageKey": tool_key,
+                "kind": "tool",
+                "name": cast(str, pkg["name"]),
+                "version": cast(str, pkg["version"]),
+                "integrity": cast(str, pkg["integrity"]),
+                "root": str(installed[0]) if installed else None,
+                "manifestPath": str(installed[1]) if installed else None,
+            }
+        )
+    return resolved_tools
+
+
+def _parse_dependency_reference(ref: DependencyReference) -> tuple[str, str | None]:
+    if isinstance(ref, str):
+        at = ref.rfind("@")
+        if at <= 0 or at == len(ref) - 1:
+            return ref, None
+        return ref[:at], ref[at + 1 :]
+
+    if isinstance(ref, dict) and isinstance(ref.get("name"), str):
+        version = ref.get("version")
+        return cast(str, ref["name"]), (
+            cast(str | None, version) if isinstance(version, str) else None
+        )
+
+    raise ValueError(f"Invalid dependency reference in installed skill manifest: {ref!r}")
+
+
+def _resolved_tools_from_skill_manifest(
+    *,
+    skill_spec_name: str,
+    skill_version: str,
+    tool_refs: list[DependencyReference],
+    packages: dict[str, dict[str, Any]],
+    tool_dir_override: str | None,
+    lockfile_path: Path,
+) -> list[ResolvedAgentToolRef]:
+    resolved_tools: list[ResolvedAgentToolRef] = []
+    for ref in tool_refs:
+        tool_name, declared_version = _parse_dependency_reference(ref)
+
+        if declared_version is None:
+            matches = [
+                (package_key, pkg)
+                for package_key, pkg in packages.items()
+                if pkg.get("kind") == "tool" and pkg.get("name") == tool_name
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f'Skill "{skill_spec_name}@{skill_version}" declares tool dependency "{tool_name}" without an exact '
+                    f"version, and it could not be resolved uniquely from {lockfile_path}."
+                )
+            tool_key, pkg = matches[0]
+        else:
+            tool_key = f"tool:{tool_name}@{declared_version}"
+            pkg_value = packages.get(tool_key)
+            if not pkg_value or pkg_value.get("kind") != "tool":
+                raise ValueError(
+                    f'Skill "{skill_spec_name}@{skill_version}" declares tool dependency "{tool_name}@{declared_version}" '
+                    f'that is not present in {lockfile_path}. Run "agentpm install" to refresh the lockfile.'
+                )
+            pkg = pkg_value
+
+        installed = _resolve_tool_installed_path(
+            cast(str, pkg["name"]), cast(str, pkg["version"]), tool_dir_override
+        )
+        resolved_tools.append(
+            {
+                "packageKey": tool_key,
+                "kind": "tool",
+                "name": cast(str, pkg["name"]),
+                "version": cast(str, pkg["version"]),
+                "integrity": cast(str, pkg["integrity"]),
+                "root": str(installed[0]) if installed else None,
+                "manifestPath": str(installed[1]) if installed else None,
+            }
+        )
+
+    return resolved_tools
+
+
 def load_skill(
     spec: str,
     *,
@@ -1152,34 +1249,23 @@ def load_skill(
 
     lock = _read_lockfile_v2(lockfile_path)
     package_key = f'skill:{package_name}@{manifest["version"]}'
+    packages = cast(dict[str, dict[str, Any]], lock.get("packages") or {})
     roots = cast(dict[str, Any], lock.get("roots") or {})
     root_entry = cast(dict[str, Any] | None, roots.get(package_key))
-    if root_entry is None:
-        raise ValueError(
-            f'Skill root "{package_key}" not found in {lockfile_path}; install the skill with agentpm install first.'
+    resolved_tools = (
+        _resolved_tools_from_lock_keys(
+            cast(list[str], root_entry.get("tools") or []), packages, tool_dir_override
         )
-
-    packages = cast(dict[str, dict[str, Any]], lock.get("packages") or {})
-    resolved_tools: list[ResolvedAgentToolRef] = []
-    for tool_key in cast(list[str], root_entry.get("tools") or []):
-        pkg = packages.get(tool_key)
-        if not pkg or pkg.get("kind") != "tool":
-            continue
-
-        installed = _resolve_tool_installed_path(
-            cast(str, pkg["name"]), cast(str, pkg["version"]), tool_dir_override
+        if root_entry is not None
+        else _resolved_tools_from_skill_manifest(
+            skill_spec_name=package_name,
+            skill_version=manifest["version"],
+            tool_refs=cast(list[DependencyReference], manifest.get("tools") or []),
+            packages=packages,
+            tool_dir_override=tool_dir_override,
+            lockfile_path=lockfile_path,
         )
-        resolved_tools.append(
-            {
-                "packageKey": tool_key,
-                "kind": "tool",
-                "name": cast(str, pkg["name"]),
-                "version": cast(str, pkg["version"]),
-                "integrity": cast(str, pkg["integrity"]),
-                "root": str(installed[0]) if installed else None,
-                "manifestPath": str(installed[1]) if installed else None,
-            }
-        )
+    )
 
     entrypoint_path = (root / manifest["skill"]["entrypoint"]).resolve()
     entrypoint_content = entrypoint_path.read_text(encoding="utf-8")

@@ -189,3 +189,74 @@ def test_load_skill_loads_tool_backed_skill_and_resolved_tools(tmp_skill_workspa
             ),
         }
     ]
+
+
+def test_load_skill_falls_back_to_manifest_tools_when_skill_root_is_absent(
+    tmp_skill_workspace: Path,
+) -> None:
+    tools_dir = tmp_skill_workspace / ".agentpm" / "tools"
+    skills_dir = tmp_skill_workspace / ".agentpm" / "skills"
+    lockfile_path = tmp_skill_workspace / "agent-owned-skill.lock"
+
+    _write_installed_tool(tools_dir, "@zack/capitalize@0.1.0")
+    _write_installed_skill(skills_dir, "@zack/triage-from-agent@0.1.0", with_tools=True)
+    lockfile_path.write_text(
+        json.dumps(
+            {
+                "lockfile_version": 3,
+                "generated": "2026-06-29T00:00:00Z",
+                "packages": {
+                    "agent:@zack/ops-console@0.1.1": {
+                        "kind": "agent",
+                        "name": "@zack/ops-console",
+                        "version": "0.1.1",
+                        "integrity": "sha256-agent",
+                    },
+                    "skill:@zack/triage-from-agent@0.1.0": {
+                        "kind": "skill",
+                        "name": "@zack/triage-from-agent",
+                        "version": "0.1.0",
+                        "integrity": "sha256-skill",
+                    },
+                    "tool:@zack/capitalize@0.1.0": {
+                        "kind": "tool",
+                        "name": "@zack/capitalize",
+                        "version": "0.1.0",
+                        "integrity": "sha256-tool",
+                    },
+                },
+                "roots": {
+                    "agent:@zack/ops-console@0.1.1": {
+                        "skills": ["skill:@zack/triage-from-agent@0.1.0"],
+                        "tools": [],
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_skill(
+        "@zack/triage-from-agent@0.1.0",
+        skill_dir_override=str(skills_dir),
+        tool_dir_override=str(tools_dir),
+        lockfile_override=str(lockfile_path),
+    )
+
+    assert loaded["kind"] == "skill"
+    assert loaded["name"] == "triage-from-agent"
+    assert "Use the checklist." in loaded["entrypointContent"]
+    assert loaded["resolvedTools"] == [
+        {
+            "packageKey": "tool:@zack/capitalize@0.1.0",
+            "kind": "tool",
+            "name": "@zack/capitalize",
+            "version": "0.1.0",
+            "integrity": "sha256-tool",
+            "root": str(skills_dir.parent / "tools" / "@zack" / "capitalize" / "0.1.0"),
+            "manifestPath": str(
+                skills_dir.parent / "tools" / "@zack" / "capitalize" / "0.1.0" / "agent.json"
+            ),
+        }
+    ]
