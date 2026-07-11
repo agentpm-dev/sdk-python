@@ -27,11 +27,14 @@ from .types import (
     DependencyReference,
     Entrypoint,
     JsonValue,
+    KnowledgeMeta,
     LoadedAgent,
+    LoadedKnowledge,
     LoadedSkill,
     LoadedWithMeta,
     Manifest,
     ReservedReferences,
+    ResolvedAgentKnowledgeRef,
     ResolvedAgentSkillRef,
     ResolvedAgentToolRef,
     Runtime,
@@ -489,6 +492,67 @@ def _resolve_skill_root(spec: str, skill_dir_override: str | None) -> tuple[Path
     )
 
 
+def _resolve_knowledge_root(spec: str, knowledge_dir_override: str | None) -> tuple[Path, Path]:
+    at = spec.rfind("@")
+    if at <= 0 or at == len(spec) - 1:
+        raise ValueError(f'Invalid knowledge spec "{spec}". Expected "@scope/name@version".')
+
+    selector = spec[at + 1 :].strip()
+    name = spec[:at]
+
+    project_root = find_project_root(Path.cwd())
+
+    candidates: list[Path] = []
+    if knowledge_dir_override:
+        candidates.append(Path(knowledge_dir_override))
+
+    env_dir = os.getenv("AGENTPM_KNOWLEDGE_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "knowledge")
+    candidates.append(Path.home() / ".agentpm" / "knowledge")
+
+    try:
+        if selector and selector.lower() != "latest":
+            VersionInfo.parse(selector)
+            for base in candidates:
+                hit = _find_installed(base, name, selector)
+                if hit:
+                    return hit
+            raise FileNotFoundError(
+                f'Knowledge package "{spec}" not found in .agentpm/knowledge (or overrides).'
+            )
+    except ValueError:
+        pass
+
+    want_latest = (not selector) or (selector.lower() == "latest")
+
+    for base in candidates:
+        installed = _list_installed_versions(base, name)
+        if not installed:
+            continue
+
+        if want_latest:
+            picked = installed[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+            continue
+
+        satisfying = [v for v in installed if _version_satisfies(v, selector)]
+        if satisfying:
+            picked = sorted(satisfying, key=VersionInfo.parse, reverse=True)[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f'No installed version of "{name}" matches "{selector or "latest"}". Searched: {searched}'
+    )
+
+
 def _read_manifest(p: Path) -> Manifest:
     m = json.loads(p.read_text(encoding="utf-8"))
     ep = m.get("entrypoint", {})
@@ -510,6 +574,15 @@ def _read_skill_manifest(p: Path) -> SkillMeta:
         raise ValueError(f"agent.json is not a skill manifest at: {p}")
     if not manifest.get("skill", {}).get("entrypoint"):
         raise ValueError(f"agent.json missing skill.entrypoint at: {p}")
+    return manifest
+
+
+def _read_knowledge_manifest(p: Path) -> KnowledgeMeta:
+    manifest = cast(KnowledgeMeta, json.loads(p.read_text(encoding="utf-8")))
+    if manifest.get("kind") != "knowledge":
+        raise ValueError(f"agent.json is not a knowledge manifest at: {p}")
+    if not manifest.get("knowledge", {}).get("mode"):
+        raise ValueError(f"agent.json missing knowledge.mode at: {p}")
     return manifest
 
 
@@ -575,6 +648,28 @@ def _resolve_skill_installed_path(
 
     candidates.append(project_root / ".agentpm" / "skills")
     candidates.append(Path.home() / ".agentpm" / "skills")
+
+    for base in candidates:
+        hit = _find_installed(base, name, version)
+        if hit:
+            return hit
+    return None
+
+
+def _resolve_knowledge_installed_path(
+    name: str, version: str, knowledge_dir_override: str | None
+) -> tuple[Path, Path] | None:
+    project_root = find_project_root(Path.cwd())
+    candidates: list[Path] = []
+    if knowledge_dir_override:
+        candidates.append(Path(knowledge_dir_override))
+
+    env_dir = os.getenv("AGENTPM_KNOWLEDGE_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "knowledge")
+    candidates.append(Path.home() / ".agentpm" / "knowledge")
 
     for base in candidates:
         hit = _find_installed(base, name, version)
@@ -958,11 +1053,31 @@ def load(
         except ValueError as skill_err:
             if "load_skill" in str(skill_err):
                 raise skill_err
-            raise err from skill_err
+            try:
+                _resolve_knowledge_root(spec, None)
+                raise ValueError(
+                    f'Package "{spec}" is Knowledge. load() is tool-only; use load_knowledge("{spec}") instead.'
+                )
+            except ValueError as knowledge_err:
+                if "load_knowledge" in str(knowledge_err):
+                    raise knowledge_err
+                raise err from skill_err
+            except FileNotFoundError:
+                raise err from skill_err
         except FileNotFoundError:
+            try:
+                _resolve_knowledge_root(spec, None)
+                raise ValueError(
+                    f'Package "{spec}" is Knowledge. load() is tool-only; use load_knowledge("{spec}") instead.'
+                )
+            except ValueError as knowledge_err:
+                if "load_knowledge" in str(knowledge_err):
+                    raise knowledge_err
+            except FileNotFoundError:
+                pass
             if isinstance(err, FileNotFoundError) and "not found in .agentpm/tools" in str(err):
                 raise FileNotFoundError(
-                    f'{err} If this package is a Skill, use load_skill("{spec}") instead.'
+                    f'{err} If this package is a Skill, use load_skill("{spec}") instead. If it is Knowledge, use load_knowledge("{spec}") instead.'
                 ) from None
             raise err from None
     m = _read_manifest(manifest_path)
@@ -1048,6 +1163,7 @@ def load_agent(
     agent_dir_override: str | None = None,
     skill_dir_override: str | None = None,
     tool_dir_override: str | None = None,
+    knowledge_dir_override: str | None = None,
     lockfile_override: str | None = None,
 ) -> LoadedAgent:
     root, manifest_path = _resolve_agent_root(spec, agent_dir_override)
@@ -1120,12 +1236,40 @@ def load_agent(
             }
         )
 
+    resolved_knowledge: list[ResolvedAgentKnowledgeRef] = []
+    for knowledge_key in cast(list[str], root_entry.get("knowledge") or []):
+        pkg = packages.get(knowledge_key)
+        if not pkg or pkg.get("kind") != "knowledge":
+            continue
+
+        installed = _resolve_knowledge_installed_path(
+            cast(str, pkg["name"]), cast(str, pkg["version"]), knowledge_dir_override
+        )
+        knowledge_manifest = _read_knowledge_manifest(installed[1]) if installed else None
+        resolved_knowledge.append(
+            {
+                "packageKey": knowledge_key,
+                "kind": "knowledge",
+                "name": cast(str, pkg["name"]),
+                "version": cast(str, pkg["version"]),
+                "integrity": cast(str, pkg["integrity"]),
+                "mode": (
+                    cast(Literal["context", "vector"], knowledge_manifest["knowledge"]["mode"])
+                    if knowledge_manifest
+                    else None
+                ),
+                "root": str(installed[0]) if installed else None,
+                "manifestPath": str(installed[1]) if installed else None,
+            }
+        )
+
     return {
         "root": str(root),
         "manifestPath": str(manifest_path),
         "manifest": manifest,
         "resolvedTools": resolved_tools,
         "resolvedSkills": resolved_skills,
+        "resolvedKnowledge": resolved_knowledge,
         "reserved": reserved,
     }
 
@@ -1284,4 +1428,62 @@ def load_skill(
         "references": list(manifest["skill"].get("references") or []),
         "scripts": list(manifest["skill"].get("scripts") or []),
         "resolvedTools": resolved_tools,
+    }
+
+
+def load_knowledge(
+    spec: str,
+    *,
+    knowledge_dir_override: str | None = None,
+) -> LoadedKnowledge:
+    root, manifest_path = _resolve_knowledge_root(spec, knowledge_dir_override)
+    manifest = _read_knowledge_manifest(manifest_path)
+    knowledge = manifest["knowledge"]
+
+    document_paths = [
+        str((root / document["path"]).resolve())
+        for document in knowledge.get("documents") or []
+        if isinstance(document, dict) and isinstance(document.get("path"), str)
+    ]
+    chunks_path = (
+        str((root / knowledge["corpus"]["chunks_path"]).resolve())
+        if knowledge.get("corpus", {}).get("chunks_path")
+        else None
+    )
+    sources_path = (
+        str((root / knowledge["corpus"]["sources_path"]).resolve())
+        if knowledge.get("corpus", {}).get("sources_path")
+        else None
+    )
+    vectors_path = (
+        str((root / knowledge["embedding"]["vectors_path"]).resolve())
+        if knowledge.get("embedding", {}).get("vectors_path")
+        else None
+    )
+    index_paths = [
+        str((root / index["path"]).resolve())
+        for index in knowledge.get("indexes") or []
+        if isinstance(index, dict) and isinstance(index.get("path"), str)
+    ]
+    provenance_path = (
+        str((root / knowledge["provenance"]["sources_manifest_path"]).resolve())
+        if knowledge.get("provenance", {}).get("sources_manifest_path")
+        else None
+    )
+
+    return {
+        "kind": "knowledge",
+        "name": manifest["name"],
+        "version": manifest["version"],
+        "description": manifest.get("description"),
+        "root": str(root),
+        "manifestPath": str(manifest_path),
+        "manifest": manifest,
+        "knowledge": knowledge,
+        "documentPaths": document_paths,
+        "chunksPath": chunks_path,
+        "sourcesPath": sources_path,
+        "vectorsPath": vectors_path,
+        "indexPaths": index_paths,
+        "provenancePath": provenance_path,
     }

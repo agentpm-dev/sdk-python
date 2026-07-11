@@ -1,10 +1,11 @@
 # AgentPM™ Python SDK
 
-A lean, typed Python SDK for **AgentPM** tools and installed agent packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved tool refs.
+A lean, typed Python SDK for **AgentPM** tools and installed agent and Knowledge packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved dependency refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
 - 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool and skill refs from `agent.lock`.
 - 📚 **Loads installed skills** from `.agentpm/skills` and exposes their manual content plus resolved tool refs.
+- 🧠 **Loads installed Knowledge packages** from `.agentpm/knowledge` and exposes mode-specific metadata and canonical paths.
 - 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
@@ -88,24 +89,35 @@ print(summarize({"text": "hello"})["summary"])
 ### Load an installed agent package
 
 ```python
-from agentpm import load, load_agent, load_skill
+from agentpm import load, load_agent, load_knowledge, load_skill
 
 agent = load_agent("@zack/support-agent@0.1.0")
+docs = load_knowledge("@zack/python-docs@0.1.0")
 first_skill = agent["resolvedSkills"][0]
 skill = load_skill(f'{first_skill["name"]}@{first_skill["version"]}')
 first_tool = skill["resolvedTools"][0]
 tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
+
+print(agent["resolvedKnowledge"])
+print(docs["knowledge"]["mode"])
 ```
 
 `load_agent()` returns:
 
 - the installed agent manifest
 - the installed agent root path
+- `resolvedKnowledge` from `agent.lock`
 - reserved refs (`knowledge`, `memory`, `profiles`) as metadata
 - `resolvedTools` from `agent.lock`
 - `resolvedSkills` from `agent.lock`
 
 It does **not** execute the agent package or orchestrate the tools for you.
+
+Compatibility note:
+
+- `resolvedKnowledge` is populated from the modern first-class `root.knowledge` entries in `agent.lock`.
+- `reserved.knowledge` is legacy pass-through metadata from older lockfile shapes. For current installs, treat `resolvedKnowledge` as the authoritative Knowledge dependency list and expect `reserved.knowledge` to usually be empty.
+- If your workspace still has an older pre-Knowledge lockfile shape where Knowledge refs only exist under `reserved.knowledge`, rerun `agentpm install` to rewrite the lockfile before expecting `resolvedKnowledge` to be populated.
 
 This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 
@@ -130,6 +142,28 @@ print(skill["resolvedTools"])
 
 `load_skill()` returns an inspectable Skill object. Skills are **not** runnable SDK objects.
 
+### Load an installed Knowledge package
+
+```python
+from agentpm import load_knowledge
+
+knowledge = load_knowledge("@zack/python-docs@0.1.0")
+
+print(knowledge["knowledge"]["mode"])
+print(knowledge["documentPaths"])
+print(knowledge["chunksPath"])
+print(knowledge["sourcesPath"])
+print(knowledge["vectorsPath"])
+print(knowledge["indexPaths"])
+```
+
+`load_knowledge()` returns an inspectable Knowledge object with:
+
+- the installed knowledge manifest
+- the installed package root path
+- parsed `knowledge` metadata
+- absolute paths for declared context documents, chunks, sources, vectors, indexes, and provenance when present
+
 ### `load()` stays tool-only
 
 ```python
@@ -137,6 +171,9 @@ from agentpm import load
 
 load("@zack/triage-playbook@0.1.0")
 # raises: use load_skill("@zack/triage-playbook@0.1.0") instead
+
+load("@zack/python-docs@0.1.0")
+# raises: use load_knowledge("@zack/python-docs@0.1.0") instead
 ```
 
 ### Optional: LangChain adapter
@@ -198,6 +235,17 @@ Installed registry skill packages live separately:
         SKILL.md
 ```
 
+Installed registry Knowledge packages live separately:
+
+```
+.agentpm/
+  knowledge/
+    @zack/python-docs/
+      0.1.0/
+        agent.json
+        knowledge/
+```
+
 ## Where installed agents are discovered
 
 Resolution order for `load_agent()`:
@@ -224,6 +272,20 @@ You can also override per call:
 
 ```python
 load_skill("@zack/triage-playbook@0.1.0", skill_dir_override="/path/to/skills")
+```
+
+## Where installed Knowledge packages are discovered
+
+Resolution order for `load_knowledge()`:
+
+1. `AGENTPM_KNOWLEDGE_DIR` (environment variable)
+2. `./.agentpm/knowledge` (project-local)
+3. `~/.agentpm/knowledge` (user-local)
+
+You can also override per call:
+
+```python
+load_knowledge("@zack/python-docs@0.1.0", knowledge_dir_override="/path/to/knowledge")
 ```
 
 ---
