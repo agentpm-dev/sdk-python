@@ -85,6 +85,47 @@ def _write_installed_agent(base_dir: Path, spec: str, skill_ref: str) -> None:
     )
 
 
+def _write_installed_knowledge(base_dir: Path, spec: str, mode: str) -> None:
+    package_name, version = _split_spec(spec)
+    root = base_dir / package_name / version
+    manifest_name = package_name.split("/", 1)[1]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            (
+                {
+                    "kind": "knowledge",
+                    "name": manifest_name,
+                    "version": version,
+                    "description": "Installed knowledge fixture",
+                    "knowledge": {
+                        "mode": "context",
+                        "documents": [{"path": "knowledge/docs/context.md"}],
+                    },
+                }
+                if mode == "context"
+                else {
+                    "kind": "knowledge",
+                    "name": manifest_name,
+                    "version": version,
+                    "description": "Installed knowledge fixture",
+                    "knowledge": {
+                        "mode": "vector",
+                        "corpus": {
+                            "chunks_path": "knowledge/chunks.jsonl",
+                            "sources_path": "knowledge/sources.jsonl",
+                        },
+                        "embedding": {"vectors_path": "knowledge/embeddings/default.f32"},
+                        "indexes": [{"path": "knowledge/indexes/default"}],
+                    },
+                }
+            ),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(scope="module")  # type: ignore[misc]
 def tmp_agent_workspace() -> Iterator[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="agentpm-sdk-py-agent-")).resolve()
@@ -100,11 +141,13 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
     skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
+    knowledge_dir = tmp_agent_workspace / ".agentpm" / "knowledge"
     lockfile_path = tmp_agent_workspace / "agent.lock"
     agent_spec = "@zack/support-agent@0.1.0"
 
     _write_installed_tool(tools_dir, "@zack/capitalize@0.1.0")
     _write_installed_skill(skills_dir, "@zack/triage-skill@0.1.0")
+    _write_installed_knowledge(knowledge_dir, "@zack/python-docs@0.1.0", "vector")
     _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
     lockfile_path.write_text(
         json.dumps(
@@ -130,11 +173,18 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
                         "version": "0.1.0",
                         "integrity": "sha256-skill",
                     },
+                    "knowledge:@zack/python-docs@0.1.0": {
+                        "kind": "knowledge",
+                        "name": "@zack/python-docs",
+                        "version": "0.1.0",
+                        "integrity": "sha256-knowledge",
+                    },
                 },
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
                         "tools": ["tool:@zack/capitalize@0.1.0"],
                         "skills": ["skill:@zack/triage-skill@0.1.0"],
+                        "knowledge": ["knowledge:@zack/python-docs@0.1.0"],
                         "reserved": {
                             "knowledge": [],
                             "memory": [],
@@ -153,6 +203,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
         agent_dir_override=str(agents_dir),
         skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
+        knowledge_dir_override=str(knowledge_dir),
         lockfile_override=str(lockfile_path),
     )
 
@@ -181,6 +232,18 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
             "integrity": "sha256-skill",
             "root": str(skills_dir / "@zack" / "triage-skill" / "0.1.0"),
             "manifestPath": str(skills_dir / "@zack" / "triage-skill" / "0.1.0" / "agent.json"),
+        }
+    ]
+    assert loaded["resolvedKnowledge"] == [
+        {
+            "packageKey": "knowledge:@zack/python-docs@0.1.0",
+            "kind": "knowledge",
+            "name": "@zack/python-docs",
+            "version": "0.1.0",
+            "integrity": "sha256-knowledge",
+            "mode": "vector",
+            "root": str(knowledge_dir / "@zack" / "python-docs" / "0.1.0"),
+            "manifestPath": str(knowledge_dir / "@zack" / "python-docs" / "0.1.0" / "agent.json"),
         }
     ]
 
@@ -479,6 +542,75 @@ def test_load_agent_returns_metadata_when_resolved_tool_is_missing_on_disk(
             "name": "@zack/missing-tool",
             "version": "0.9.0",
             "integrity": "sha256-missing-tool",
+            "root": None,
+            "manifestPath": None,
+        }
+    ]
+
+
+def test_load_agent_returns_metadata_when_resolved_knowledge_is_missing_on_disk(
+    tmp_agent_workspace: Path,
+) -> None:
+    tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
+    agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
+    knowledge_dir = tmp_agent_workspace / ".agentpm" / "knowledge"
+    agent_spec = "@zack/support-agent@0.1.0"
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
+
+    missing_knowledge_lockfile_path = tmp_agent_workspace / "agent-missing-knowledge.lock"
+    missing_knowledge_lockfile_path.write_text(
+        json.dumps(
+            {
+                "lockfile_version": 3,
+                "generated": "2026-05-23T00:00:00Z",
+                "packages": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "kind": "agent",
+                        "name": "@zack/support-agent",
+                        "version": "0.1.0",
+                        "integrity": "sha256-agent",
+                    },
+                    "knowledge:@zack/missing-docs@0.9.0": {
+                        "kind": "knowledge",
+                        "name": "@zack/missing-docs",
+                        "version": "0.9.0",
+                        "integrity": "sha256-missing-knowledge",
+                    },
+                },
+                "roots": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "tools": [],
+                        "skills": [],
+                        "knowledge": ["knowledge:@zack/missing-docs@0.9.0"],
+                        "reserved": {
+                            "knowledge": [],
+                            "memory": [],
+                            "profiles": [],
+                        },
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_agent(
+        agent_spec,
+        agent_dir_override=str(agents_dir),
+        skill_dir_override=str(skills_dir),
+        tool_dir_override=str(tools_dir),
+        knowledge_dir_override=str(knowledge_dir),
+        lockfile_override=str(missing_knowledge_lockfile_path),
+    )
+    assert loaded["resolvedKnowledge"] == [
+        {
+            "packageKey": "knowledge:@zack/missing-docs@0.9.0",
+            "kind": "knowledge",
+            "name": "@zack/missing-docs",
+            "version": "0.9.0",
+            "integrity": "sha256-missing-knowledge",
+            "mode": None,
             "root": None,
             "manifestPath": None,
         }

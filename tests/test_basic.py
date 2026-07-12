@@ -327,3 +327,35 @@ def test_load_rejects_installed_skill_specs(tmp_tools_dir: Path) -> None:
 def test_load_missing_skill_like_spec_suggests_load_skill(tmp_tools_dir: Path) -> None:
     with pytest.raises(FileNotFoundError, match="load_skill"):
         load("@zack/missing-skill@0.1.0", tool_dir_override=str(tmp_tools_dir))
+
+
+def test_load_rejects_installed_knowledge_specs(tmp_tools_dir: Path) -> None:
+    knowledge_dir = tmp_tools_dir / "knowledge"
+    knowledge_spec = "@zack/python-docs@0.1.0"
+    name, version = _split_spec(knowledge_spec)
+    root = knowledge_dir / name / version
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "knowledge",
+                "name": "python-docs",
+                "version": version,
+                "description": "Knowledge fixture",
+                "knowledge": {"mode": "vector"},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        import os
+
+        os.environ["AGENTPM_KNOWLEDGE_DIR"] = str(knowledge_dir)
+        with pytest.raises(ValueError, match="load_knowledge"):
+            load(knowledge_spec, tool_dir_override=str(tmp_tools_dir))
+    finally:
+        import os
+
+        os.environ.pop("AGENTPM_KNOWLEDGE_DIR", None)

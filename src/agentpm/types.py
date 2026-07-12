@@ -96,6 +96,88 @@ class SkillMeta(TypedDict, total=False):
     skill: Required[SkillMetadata]
 
 
+class KnowledgeDocument(TypedDict, total=False):
+    path: Required[str]
+    content_type: NotRequired[str]
+    role: NotRequired[str]
+    description: NotRequired[str]
+    bytes: NotRequired[int]
+    sha256: NotRequired[str]
+
+
+class KnowledgeContext(TypedDict, total=False):
+    document_count: NotRequired[int]
+    total_bytes: NotRequired[int]
+    content_hash: NotRequired[str]
+
+
+class KnowledgeCorpus(TypedDict, total=False):
+    chunks_path: NotRequired[str]
+    sources_path: NotRequired[str]
+    chunk_count: NotRequired[int]
+    source_count: NotRequired[int]
+    content_hash: NotRequired[str]
+
+
+class KnowledgeEmbedding(TypedDict, total=False):
+    id: NotRequired[str]
+    provider: NotRequired[str]
+    model: NotRequired[str]
+    dimensions: NotRequired[int]
+    metric: NotRequired[str]
+    normalized: NotRequired[bool]
+    vectors_path: NotRequired[str]
+    vector_count: NotRequired[int]
+    vectors_hash: NotRequired[str]
+
+
+class KnowledgeIndex(TypedDict, total=False):
+    id: NotRequired[str]
+    type: NotRequired[str]
+    path: NotRequired[str]
+    embedding_id: NotRequired[str]
+    generated_by: NotRequired[str]
+
+
+class KnowledgeRetrieval(TypedDict, total=False):
+    strategy: NotRequired[str]
+    default_top_k: NotRequired[int]
+    default_score_threshold: NotRequired[float]
+    return_citations: NotRequired[bool]
+
+
+class KnowledgeBuilder(TypedDict, total=False):
+    name: NotRequired[str]
+    version: NotRequired[str]
+
+
+class KnowledgeProvenance(TypedDict, total=False):
+    sources_manifest_path: NotRequired[str]
+    generated_at: NotRequired[str]
+    builder: NotRequired[KnowledgeBuilder]
+
+
+class KnowledgeMetadata(TypedDict, total=False):
+    mode: Required[Literal["context", "vector"]]
+    content_type: NotRequired[str]
+    language: NotRequired[str]
+    documents: NotRequired[list[KnowledgeDocument]]
+    context: NotRequired[KnowledgeContext]
+    corpus: NotRequired[KnowledgeCorpus]
+    embedding: NotRequired[KnowledgeEmbedding]
+    indexes: NotRequired[list[KnowledgeIndex]]
+    retrieval: NotRequired[KnowledgeRetrieval]
+    provenance: NotRequired[KnowledgeProvenance]
+
+
+class KnowledgeMeta(TypedDict, total=False):
+    kind: Required[Literal["knowledge"]]
+    name: Required[str]
+    version: Required[str]
+    description: NotRequired[str]
+    knowledge: Required[KnowledgeMetadata]
+
+
 class ReservedReferences(TypedDict):
     knowledge: list[DependencyReference]
     memory: list[DependencyReference]
@@ -122,12 +204,24 @@ class ResolvedAgentSkillRef(TypedDict):
     manifestPath: str | None
 
 
+class ResolvedAgentKnowledgeRef(TypedDict):
+    packageKey: str
+    kind: Literal["knowledge"]
+    name: str
+    version: str
+    integrity: str
+    mode: Literal["context", "vector"] | None
+    root: str | None
+    manifestPath: str | None
+
+
 class LoadedAgent(TypedDict):
     root: str
     manifestPath: str
     manifest: AgentMeta
     resolvedTools: list[ResolvedAgentToolRef]
     resolvedSkills: list[ResolvedAgentSkillRef]
+    resolvedKnowledge: list[ResolvedAgentKnowledgeRef]
     reserved: ReservedReferences
 
 
@@ -145,3 +239,20 @@ class LoadedSkill(TypedDict):
     references: list[str]
     scripts: list[str]
     resolvedTools: list[ResolvedAgentToolRef]
+
+
+class LoadedKnowledge(TypedDict):
+    kind: Literal["knowledge"]
+    name: str
+    version: str
+    description: str | None
+    root: str
+    manifestPath: str
+    manifest: KnowledgeMeta
+    knowledge: KnowledgeMetadata
+    documentPaths: list[str]
+    chunksPath: str | None
+    sourcesPath: str | None
+    vectorsPath: str | None
+    indexPaths: list[str]
+    provenancePath: str | None
