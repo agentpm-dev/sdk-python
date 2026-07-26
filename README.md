@@ -1,11 +1,12 @@
 # AgentPM™ Python SDK
 
-A lean, typed Python SDK for **AgentPM** tools and installed agent and Knowledge packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved dependency refs.
+A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, and Memory packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved dependency refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
 - 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool and skill refs from `agent.lock`.
 - 📚 **Loads installed skills** from `.agentpm/skills` and exposes their manual content plus resolved tool refs.
 - 🧠 **Loads installed Knowledge packages** from `.agentpm/knowledge` and exposes mode-specific metadata and canonical paths.
+- ♾️ **Loads installed Memory packages** from `.agentpm/memory` and exposes authored blueprint metadata, build metadata, contract indexes, and resolved contract paths.
 - 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
@@ -89,17 +90,20 @@ print(summarize({"text": "hello"})["summary"])
 ### Load an installed agent package
 
 ```python
-from agentpm import load, load_agent, load_knowledge, load_skill
+from agentpm import load, load_agent, load_knowledge, load_memory, load_skill
 
 agent = load_agent("@zack/support-agent@0.1.0")
 docs = load_knowledge("@zack/python-docs@0.1.0")
+memory = load_memory("@zack/profile-memory@0.1.0")
 first_skill = agent["resolvedSkills"][0]
 skill = load_skill(f'{first_skill["name"]}@{first_skill["version"]}')
 first_tool = skill["resolvedTools"][0]
 tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
 
 print(agent["resolvedKnowledge"])
+print(agent["resolvedMemory"])
 print(docs["knowledge"]["mode"])
+print(memory["contracts"])
 ```
 
 `load_agent()` returns:
@@ -107,6 +111,7 @@ print(docs["knowledge"]["mode"])
 - the installed agent manifest
 - the installed agent root path
 - `resolvedKnowledge` from `agent.lock`
+- `resolvedMemory` from `agent.lock`
 - reserved refs (`knowledge`, `memory`, `profiles`) as metadata
 - `resolvedTools` from `agent.lock`
 - `resolvedSkills` from `agent.lock`
@@ -164,6 +169,38 @@ print(knowledge["indexPaths"])
 - parsed `knowledge` metadata
 - absolute paths for declared context documents, chunks, sources, vectors, indexes, and provenance when present
 
+### Load an installed Memory package
+
+```python
+from agentpm import load_memory, load_memory_contract
+
+memory = load_memory("@zack/profile-memory@0.1.0")
+profile_contract = load_memory_contract(
+    memory,
+    space="profile",
+    record_type="user_preference",
+)
+
+print(memory["memory"]["spaces"])
+print(memory["build"])
+print(memory["contractIndex"])
+print(memory["contracts"])
+print(profile_contract)
+```
+
+`load_memory()` returns an inspectable Memory Blueprint object with:
+
+- the installed memory manifest
+- the installed package root path
+- parsed `memory` metadata
+- parsed `memory/build.json`
+- parsed `memory/contracts/index.json`
+- absolute paths for declared source schemas and indexed resolved contracts
+
+It is a metadata and contract loader only. It does not provide live record CRUD, retention enforcement, trigger execution, or a hosted memory runtime.
+
+`load_memory_contract()` loads one indexed resolved contract on demand by `space` + `record_type`.
+
 ### `load()` stays tool-only
 
 ```python
@@ -174,6 +211,9 @@ load("@zack/triage-playbook@0.1.0")
 
 load("@zack/python-docs@0.1.0")
 # raises: use load_knowledge("@zack/python-docs@0.1.0") instead
+
+load("@zack/profile-memory@0.1.0")
+# raises: use load_memory("@zack/profile-memory@0.1.0") instead
 ```
 
 ### Optional: LangChain adapter
@@ -246,6 +286,18 @@ Installed registry Knowledge packages live separately:
         knowledge/
 ```
 
+Installed registry Memory packages live separately:
+
+```
+.agentpm/
+  memory/
+    @zack/profile-memory/
+      0.1.0/
+        agent.json
+        schemas/
+        memory/
+```
+
 ## Where installed agents are discovered
 
 Resolution order for `load_agent()`:
@@ -286,6 +338,20 @@ You can also override per call:
 
 ```python
 load_knowledge("@zack/python-docs@0.1.0", knowledge_dir_override="/path/to/knowledge")
+```
+
+## Where installed Memory packages are discovered
+
+Resolution order for `load_memory()`:
+
+1. `AGENTPM_MEMORY_DIR` (environment variable)
+2. `./.agentpm/memory` (project-local)
+3. `~/.agentpm/memory` (user-local)
+
+You can also override per call:
+
+```python
+load_memory("@zack/profile-memory@0.1.0", memory_dir_override="/path/to/memory")
 ```
 
 ---
@@ -335,7 +401,7 @@ The SDK validates the interpreter and checks it’s present on `PATH`.
 ```
 src/
   agentpm/
-    __init__.py           # re-exports: load, load_agent, load_skill, to_langchain_tool (lazy)
+    __init__.py           # re-exports: load, load_agent, load_knowledge, load_memory, load_skill, to_langchain_tool (lazy)
     core.py               # resolver/spawn/JSON plumbing
     types.py              # JsonValue, TypedDicts
     adapters/
@@ -345,6 +411,7 @@ src/
 tests/
   test_basic.py
   test_load_agent.py
+  test_load_memory.py
   test_load_skill.py
 ```
 

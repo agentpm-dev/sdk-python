@@ -178,6 +178,127 @@ class KnowledgeMeta(TypedDict, total=False):
     knowledge: Required[KnowledgeMetadata]
 
 
+class MemoryScope(TypedDict, total=False):
+    description: NotRequired[str]
+
+
+class MemoryRecordType(TypedDict, total=False):
+    description: NotRequired[str]
+    schema: Required[str]
+    version: Required[str]
+
+
+class MemoryRetrieval(TypedDict):
+    modes: list[str]
+
+
+class MemoryCapacity(TypedDict, total=False):
+    max_records: NotRequired[int]
+
+
+class MemoryRetention(TypedDict, total=False):
+    ttl: NotRequired[str]
+    on_expire: NotRequired[str]
+
+
+class MemoryConstraints(TypedDict, total=False):
+    append_only: NotRequired[bool]
+
+
+class MemorySpace(TypedDict, total=False):
+    description: NotRequired[str]
+    model: Required[str]
+    scope: Required[list[str]]
+    record_types: Required[list[str]]
+    retrieval: Required[MemoryRetrieval]
+    capacity: NotRequired[MemoryCapacity]
+    retention: NotRequired[MemoryRetention]
+    constraints: NotRequired[MemoryConstraints]
+
+
+class MemoryOperationRef(TypedDict):
+    space: str
+    record_type: str
+
+
+class MemoryOperationTarget(TypedDict):
+    space: str
+    record_type: str
+
+
+class MemoryOperationTrigger(TypedDict, total=False):
+    type: Required[str]
+    space: NotRequired[str]
+    threshold: NotRequired[int]
+    every: NotRequired[str]
+
+
+class MemoryOperation(TypedDict, total=False):
+    type: Required[str]
+    description: NotRequired[str]
+    inputs: NotRequired[list[MemoryOperationRef]]
+    output: NotRequired[MemoryOperationRef]
+    targets: NotRequired[list[MemoryOperationTarget]]
+    trigger: NotRequired[MemoryOperationTrigger]
+    source_handling: NotRequired[str]
+    preserve_provenance: NotRequired[bool]
+    cascade_derived_records: NotRequired[bool]
+
+
+class MemoryMetadata(TypedDict):
+    scopes: dict[str, MemoryScope]
+    record_types: dict[str, MemoryRecordType]
+    spaces: dict[str, MemorySpace]
+    operations: NotRequired[dict[str, MemoryOperation]]
+
+
+class MemoryMeta(TypedDict, total=False):
+    kind: Required[Literal["memory"]]
+    name: Required[str]
+    version: Required[str]
+    description: NotRequired[str]
+    memory: Required[MemoryMetadata]
+
+
+class MemoryBuildSourceSchemaEntry(TypedDict):
+    path: str
+    sha256: str
+
+
+class MemoryBuildMetadata(TypedDict, total=False):
+    type: Required[str]
+    format_version: Required[int]
+    built_at: NotRequired[str]
+    agentpm_version: NotRequired[str]
+    manifest_path: Required[str]
+    source_manifest_hash: Required[str]
+    source_schemas: NotRequired[list[MemoryBuildSourceSchemaEntry]]
+    source_schemas_hash: Required[str]
+    source_contract_inputs_hash: Required[str]
+    contracts_index_hash: Required[str]
+    contracts_hash: Required[str]
+    contract_count: Required[int]
+
+
+class MemoryContractIndexEntry(TypedDict):
+    space: str
+    record_type: str
+    schema_version: str
+    model: str
+    source_schema: str
+    path: str
+    sha256: str
+
+
+class MemoryContractIndex(TypedDict):
+    type: str
+    format_version: int
+    contracts: list[MemoryContractIndexEntry]
+
+
+MemoryContractSchema = dict[str, object]
+
+
 class ReservedReferences(TypedDict):
     knowledge: list[DependencyReference]
     memory: list[DependencyReference]
@@ -215,6 +336,16 @@ class ResolvedAgentKnowledgeRef(TypedDict):
     manifestPath: str | None
 
 
+class ResolvedAgentMemoryRef(TypedDict):
+    packageKey: str
+    kind: Literal["memory"]
+    name: str
+    version: str
+    integrity: str
+    root: str | None
+    manifestPath: str | None
+
+
 class LoadedAgent(TypedDict):
     root: str
     manifestPath: str
@@ -222,6 +353,7 @@ class LoadedAgent(TypedDict):
     resolvedTools: list[ResolvedAgentToolRef]
     resolvedSkills: list[ResolvedAgentSkillRef]
     resolvedKnowledge: list[ResolvedAgentKnowledgeRef]
+    resolvedMemory: list[ResolvedAgentMemoryRef]
     reserved: ReservedReferences
 
 
@@ -256,3 +388,30 @@ class LoadedKnowledge(TypedDict):
     vectorsPath: str | None
     indexPaths: list[str]
     provenancePath: str | None
+
+
+class LoadedMemoryContractRef(TypedDict):
+    space: str
+    recordType: str
+    schemaVersion: str
+    model: str
+    sourceSchemaPath: str
+    path: str
+    sha256: str
+
+
+class LoadedMemory(TypedDict):
+    kind: Literal["memory"]
+    name: str
+    version: str
+    description: str | None
+    root: str
+    manifestPath: str
+    manifest: MemoryMeta
+    memory: MemoryMetadata
+    buildPath: str
+    build: MemoryBuildMetadata
+    contractIndexPath: str
+    contractIndex: MemoryContractIndex
+    sourceSchemaPaths: list[str]
+    contracts: list[LoadedMemoryContractRef]
