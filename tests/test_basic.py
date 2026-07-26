@@ -142,6 +142,88 @@ sys.exit(2)
     shutil.copy2(root / "agent.json", flat_root / "agent.json")
 
 
+def _write_memory_package(base_dir: Path, spec: str) -> None:
+    name, version = _split_spec(spec)
+    root = base_dir / name / version
+    (root / "schemas").mkdir(parents=True, exist_ok=True)
+    (root / "memory" / "contracts").mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "memory",
+                "name": name.split("/", 1)[1],
+                "version": version,
+                "description": "Memory fixture",
+                "memory": {
+                    "scopes": {"user": {"description": "User scope"}},
+                    "record_types": {
+                        "user_preference": {
+                            "schema": "schemas/user-preference.schema.json",
+                            "version": "1.0.0",
+                        }
+                    },
+                    "spaces": {
+                        "profile": {
+                            "model": "document",
+                            "scope": ["user"],
+                            "record_types": ["user_preference"],
+                            "retrieval": {"modes": ["key"]},
+                        }
+                    },
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "schemas" / "user-preference.schema.json").write_text(
+        json.dumps({"type": "object"}, indent=2),
+        encoding="utf-8",
+    )
+    (root / "memory" / "build.json").write_text(
+        json.dumps(
+            {
+                "type": "agentpm-memory-contracts",
+                "format_version": 1,
+                "manifest_path": "agent.json",
+                "source_manifest_hash": "sha256:manifest",
+                "source_schemas_hash": "sha256:schemas",
+                "source_contract_inputs_hash": "sha256:inputs",
+                "contracts_index_hash": "sha256:index",
+                "contracts_hash": "sha256:contracts",
+                "contract_count": 1,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "memory" / "contracts" / "index.json").write_text(
+        json.dumps(
+            {
+                "type": "agentpm-memory-contract-index",
+                "format_version": 1,
+                "contracts": [
+                    {
+                        "space": "profile",
+                        "record_type": "user_preference",
+                        "schema_version": "1.0.0",
+                        "model": "document",
+                        "source_schema": "schemas/user-preference.schema.json",
+                        "path": "memory/contracts/profile.user_preference.schema.json",
+                        "sha256": "sha256:contract",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "memory" / "contracts" / "profile.user_preference.schema.json").write_text(
+        json.dumps({"type": "object"}, indent=2),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(scope="module")  # type: ignore[misc]  # pytest decorator is untyped
 def tmp_tools_dir() -> Iterator[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="agentpm-sdk-pytest-")).resolve()
@@ -359,3 +441,20 @@ def test_load_rejects_installed_knowledge_specs(tmp_tools_dir: Path) -> None:
         import os
 
         os.environ.pop("AGENTPM_KNOWLEDGE_DIR", None)
+
+
+def test_load_rejects_installed_memory_specs(tmp_tools_dir: Path) -> None:
+    memory_dir = tmp_tools_dir / "memory"
+    memory_spec = "@zack/profile-memory@0.1.0"
+    _write_memory_package(memory_dir, memory_spec)
+
+    try:
+        import os
+
+        os.environ["AGENTPM_MEMORY_DIR"] = str(memory_dir)
+        with pytest.raises(ValueError, match="load_memory"):
+            load(memory_spec, tool_dir_override=str(tmp_tools_dir))
+    finally:
+        import os
+
+        os.environ.pop("AGENTPM_MEMORY_DIR", None)

@@ -30,11 +30,19 @@ from .types import (
     KnowledgeMeta,
     LoadedAgent,
     LoadedKnowledge,
+    LoadedMemory,
+    LoadedMemoryContractRef,
     LoadedSkill,
     LoadedWithMeta,
     Manifest,
+    MemoryBuildMetadata,
+    MemoryContractIndex,
+    MemoryContractSchema,
+    MemoryMeta,
+    MemoryMetadata,
     ReservedReferences,
     ResolvedAgentKnowledgeRef,
+    ResolvedAgentMemoryRef,
     ResolvedAgentSkillRef,
     ResolvedAgentToolRef,
     Runtime,
@@ -553,6 +561,74 @@ def _resolve_knowledge_root(spec: str, knowledge_dir_override: str | None) -> tu
     )
 
 
+def _resolve_memory_root(spec: str, memory_dir_override: str | None) -> tuple[Path, Path]:
+    at = spec.rfind("@")
+    if at <= 0 or at == len(spec) - 1:
+        raise ValueError(f'Invalid memory spec "{spec}". Expected "@scope/name@version".')
+
+    selector = spec[at + 1 :].strip()
+    name = spec[:at]
+
+    project_root = find_project_root(Path.cwd())
+
+    candidates: list[Path] = []
+    if memory_dir_override:
+        candidates.append(Path(memory_dir_override))
+
+    env_dir = os.getenv("AGENTPM_MEMORY_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "memory")
+    candidates.append(Path.home() / ".agentpm" / "memory")
+
+    try:
+        if selector and selector.lower() != "latest":
+            VersionInfo.parse(selector)
+            for base in candidates:
+                hit = _find_installed(base, name, selector)
+                if hit:
+                    return hit
+            raise FileNotFoundError(
+                f'Memory package "{spec}" not found in .agentpm/memory (or overrides).'
+            )
+    except ValueError:
+        normalized = _normalize_selector(selector)
+        try:
+            _ = all(semver_match("0.0.0", token) for token in normalized.split() if token)
+        except ValueError:
+            raise ValueError(
+                f'Invalid version/range "{selector}". Use exact (e.g. 0.1.2), '
+                'a semver range (e.g. ^0.1), or "latest".'
+            ) from None
+
+    want_latest = (not selector) or (selector.lower() == "latest")
+
+    for base in candidates:
+        installed = _list_installed_versions(base, name)
+        if not installed:
+            continue
+
+        if want_latest:
+            picked = installed[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+            continue
+
+        satisfying = [v for v in installed if _version_satisfies(v, selector)]
+        if satisfying:
+            picked = sorted(satisfying, key=VersionInfo.parse, reverse=True)[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f'No installed version of "{name}" matches "{selector or "latest"}". Searched: {searched}'
+    )
+
+
 def _read_manifest(p: Path) -> Manifest:
     m = json.loads(p.read_text(encoding="utf-8"))
     ep = m.get("entrypoint", {})
@@ -586,6 +662,16 @@ def _read_knowledge_manifest(p: Path) -> KnowledgeMeta:
     return manifest
 
 
+def _read_memory_manifest(p: Path) -> MemoryMeta:
+    manifest = cast(MemoryMeta, json.loads(p.read_text(encoding="utf-8")))
+    if manifest.get("kind") != "memory":
+        raise ValueError(f"agent.json is not a memory manifest at: {p}")
+    memory = manifest.get("memory")
+    if not isinstance(memory, dict):
+        raise ValueError(f"agent.json missing memory object at: {p}")
+    return manifest
+
+
 # Historical name: this helper now accepts modern agent.lock shapes v2 and v3.
 # Keep the narrower name for now to avoid internal churn while Skills remain the
 # only v3-specific addition on top of the same overall lock envelope.
@@ -610,6 +696,195 @@ def _empty_reserved_references() -> ReservedReferences:
         "memory": [],
         "profiles": [],
     }
+
+
+def _is_safe_relative_path(value: str) -> bool:
+    if not value or os.path.isabs(value):
+        return False
+    normalized = Path(value.replace("\\", "/"))
+    return all(part not in ("..", "") for part in normalized.parts) and str(normalized) != "."
+
+
+def _resolve_installed_memory_file(
+    root: Path,
+    relative_path: str,
+    field_label: str,
+    *,
+    required_prefix: str | None = None,
+) -> Path:
+    if not _is_safe_relative_path(relative_path):
+        raise ValueError(f"{field_label} must be a safe package-relative path.")
+
+    normalized = Path(relative_path.replace("\\", "/"))
+    normalized_text = normalized.as_posix()
+    if required_prefix and not normalized_text.startswith(required_prefix):
+        raise ValueError(f"{field_label} must remain under {required_prefix}.")
+
+    root_real = root.resolve()
+    target = (root / normalized).resolve()
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError(f"{field_label} is missing at {normalized_text}.")
+
+    with suppress(ValueError):
+        target.relative_to(root_real)
+        return target
+    raise ValueError(f"{field_label} resolves outside the installed memory package root.")
+
+
+def _read_json_file(path: Path, field_label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_label} is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_label} must be a JSON object.")
+    return cast(dict[str, Any], value)
+
+
+def _read_memory_build_metadata(root: Path) -> tuple[Path, MemoryBuildMetadata]:
+    build_path = _resolve_installed_memory_file(root, "memory/build.json", "memory/build.json")
+    build_json = _read_json_file(build_path, "memory/build.json")
+
+    if build_json.get("type") != "agentpm-memory-contracts":
+        raise ValueError("memory/build.json has unsupported type.")
+    if build_json.get("format_version") != 1:
+        raise ValueError("memory/build.json has unsupported format_version.")
+    if not isinstance(build_json.get("manifest_path"), str) or not build_json["manifest_path"]:
+        raise ValueError("memory/build.json missing manifest_path.")
+    for field in (
+        "source_manifest_hash",
+        "source_schemas_hash",
+        "source_contract_inputs_hash",
+        "contracts_index_hash",
+        "contracts_hash",
+    ):
+        if not isinstance(build_json.get(field), str) or not build_json[field]:
+            raise ValueError(f"memory/build.json missing {field}.")
+    contract_count = build_json.get("contract_count")
+    if not isinstance(contract_count, int):
+        raise ValueError("memory/build.json missing contract_count.")
+
+    source_schemas = build_json.get("source_schemas")
+    if source_schemas is not None:
+        if not isinstance(source_schemas, list):
+            raise ValueError("memory/build.json has invalid source_schemas entries.")
+        for entry in source_schemas:
+            if not isinstance(entry, dict):
+                raise ValueError("memory/build.json has invalid source_schemas entries.")
+            if not isinstance(entry.get("path"), str) or not isinstance(entry.get("sha256"), str):
+                raise ValueError("memory/build.json has invalid source_schemas entries.")
+
+    return build_path, cast(MemoryBuildMetadata, build_json)
+
+
+def _read_memory_contract_index(
+    root: Path, memory: MemoryMetadata, expected_contract_count: int
+) -> tuple[Path, MemoryContractIndex, list[str], list[LoadedMemoryContractRef]]:
+    index_path = _resolve_installed_memory_file(
+        root,
+        "memory/contracts/index.json",
+        "memory/contracts/index.json",
+        required_prefix="memory/contracts/",
+    )
+    index_json = _read_json_file(index_path, "memory/contracts/index.json")
+
+    if index_json.get("type") != "agentpm-memory-contract-index":
+        raise ValueError("memory/contracts/index.json has unsupported type.")
+    if index_json.get("format_version") != 1:
+        raise ValueError("memory/contracts/index.json has unsupported format_version.")
+
+    contracts = index_json.get("contracts")
+    if not isinstance(contracts, list):
+        raise ValueError("memory/contracts/index.json missing contracts array.")
+    if len(contracts) != expected_contract_count:
+        raise ValueError(
+            "memory/build.json contract_count does not match memory/contracts/index.json."
+        )
+
+    seen_identities: set[tuple[str, str]] = set()
+    seen_paths: set[str] = set()
+    source_schema_paths: set[str] = set()
+    resolved_contracts: list[LoadedMemoryContractRef] = []
+
+    for index, entry in enumerate(contracts):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"memory/contracts/index.json contract entry {index} must be an object."
+            )
+        space = entry.get("space")
+        record_type = entry.get("record_type")
+        schema_version = entry.get("schema_version")
+        model = entry.get("model")
+        source_schema = entry.get("source_schema")
+        contract_path = entry.get("path")
+        sha256 = entry.get("sha256")
+        if not all(
+            isinstance(value, str)
+            for value in (
+                space,
+                record_type,
+                schema_version,
+                model,
+                source_schema,
+                contract_path,
+                sha256,
+            )
+        ):
+            raise ValueError(
+                f"memory/contracts/index.json contract entry {index} is missing required fields."
+            )
+
+        record_type_manifest = memory["record_types"].get(cast(str, record_type))
+        if (
+            not isinstance(record_type_manifest, dict)
+            or record_type_manifest.get("schema") != source_schema
+        ):
+            raise ValueError(
+                f'memory/contracts/index.json references undeclared source schema "{source_schema}".'
+            )
+
+        identity = (cast(str, space), cast(str, record_type))
+        if identity in seen_identities:
+            raise ValueError(
+                f'memory/contracts/index.json contains duplicate contract entry "{identity[0]}:{identity[1]}".'
+            )
+        seen_identities.add(identity)
+        if cast(str, contract_path) in seen_paths:
+            raise ValueError(
+                f'memory/contracts/index.json contains duplicate contract path "{contract_path}".'
+            )
+        seen_paths.add(cast(str, contract_path))
+
+        resolved_contract_path = _resolve_installed_memory_file(
+            root,
+            cast(str, contract_path),
+            f'memory/contracts/index.json contract path "{contract_path}"',
+            required_prefix="memory/contracts/",
+        )
+        resolved_source_schema_path = _resolve_installed_memory_file(
+            root,
+            cast(str, source_schema),
+            f'memory/contracts/index.json source schema "{source_schema}"',
+        )
+        source_schema_paths.add(str(resolved_source_schema_path))
+        resolved_contracts.append(
+            {
+                "space": cast(str, space),
+                "recordType": cast(str, record_type),
+                "schemaVersion": cast(str, schema_version),
+                "model": cast(str, model),
+                "sourceSchemaPath": str(resolved_source_schema_path),
+                "path": str(resolved_contract_path),
+                "sha256": cast(str, sha256),
+            }
+        )
+
+    return (
+        index_path,
+        cast(MemoryContractIndex, index_json),
+        sorted(source_schema_paths),
+        resolved_contracts,
+    )
 
 
 def _resolve_tool_installed_path(
@@ -670,6 +945,28 @@ def _resolve_knowledge_installed_path(
 
     candidates.append(project_root / ".agentpm" / "knowledge")
     candidates.append(Path.home() / ".agentpm" / "knowledge")
+
+    for base in candidates:
+        hit = _find_installed(base, name, version)
+        if hit:
+            return hit
+    return None
+
+
+def _resolve_memory_installed_path(
+    name: str, version: str, memory_dir_override: str | None
+) -> tuple[Path, Path] | None:
+    project_root = find_project_root(Path.cwd())
+    candidates: list[Path] = []
+    if memory_dir_override:
+        candidates.append(Path(memory_dir_override))
+
+    env_dir = os.getenv("AGENTPM_MEMORY_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "memory")
+    candidates.append(Path.home() / ".agentpm" / "memory")
 
     for base in candidates:
         hit = _find_installed(base, name, version)
@@ -1061,6 +1358,14 @@ def load(
             except ValueError as knowledge_err:
                 if "load_knowledge" in str(knowledge_err):
                     raise knowledge_err
+                try:
+                    _resolve_memory_root(spec, None)
+                    raise ValueError(
+                        f'Package "{spec}" is Memory. load() is tool-only; use load_memory("{spec}") instead.'
+                    )
+                except ValueError as memory_err:
+                    if "load_memory" in str(memory_err):
+                        raise memory_err
                 raise err from skill_err
             except FileNotFoundError:
                 raise err from skill_err
@@ -1074,10 +1379,19 @@ def load(
                 if "load_knowledge" in str(knowledge_err):
                     raise knowledge_err
             except FileNotFoundError:
-                pass
+                try:
+                    _resolve_memory_root(spec, None)
+                    raise ValueError(
+                        f'Package "{spec}" is Memory. load() is tool-only; use load_memory("{spec}") instead.'
+                    )
+                except ValueError as memory_err:
+                    if "load_memory" in str(memory_err):
+                        raise memory_err
+                except FileNotFoundError:
+                    pass
             if isinstance(err, FileNotFoundError) and "not found in .agentpm/tools" in str(err):
                 raise FileNotFoundError(
-                    f'{err} If this package is a Skill, use load_skill("{spec}") instead. If it is Knowledge, use load_knowledge("{spec}") instead.'
+                    f'{err} If this package is a Skill, use load_skill("{spec}") instead. If it is Knowledge, use load_knowledge("{spec}") instead. If it is Memory, use load_memory("{spec}") instead.'
                 ) from None
             raise err from None
     m = _read_manifest(manifest_path)
@@ -1164,6 +1478,7 @@ def load_agent(
     skill_dir_override: str | None = None,
     tool_dir_override: str | None = None,
     knowledge_dir_override: str | None = None,
+    memory_dir_override: str | None = None,
     lockfile_override: str | None = None,
 ) -> LoadedAgent:
     root, manifest_path = _resolve_agent_root(spec, agent_dir_override)
@@ -1263,6 +1578,27 @@ def load_agent(
             }
         )
 
+    resolved_memory: list[ResolvedAgentMemoryRef] = []
+    for memory_key in cast(list[str], root_entry.get("memory") or []):
+        pkg = packages.get(memory_key)
+        if not pkg or pkg.get("kind") != "memory":
+            continue
+
+        installed = _resolve_memory_installed_path(
+            cast(str, pkg["name"]), cast(str, pkg["version"]), memory_dir_override
+        )
+        resolved_memory.append(
+            {
+                "packageKey": memory_key,
+                "kind": "memory",
+                "name": cast(str, pkg["name"]),
+                "version": cast(str, pkg["version"]),
+                "integrity": cast(str, pkg["integrity"]),
+                "root": str(installed[0]) if installed else None,
+                "manifestPath": str(installed[1]) if installed else None,
+            }
+        )
+
     return {
         "root": str(root),
         "manifestPath": str(manifest_path),
@@ -1270,6 +1606,7 @@ def load_agent(
         "resolvedTools": resolved_tools,
         "resolvedSkills": resolved_skills,
         "resolvedKnowledge": resolved_knowledge,
+        "resolvedMemory": resolved_memory,
         "reserved": reserved,
     }
 
@@ -1487,3 +1824,61 @@ def load_knowledge(
         "indexPaths": index_paths,
         "provenancePath": provenance_path,
     }
+
+
+def load_memory(
+    spec: str,
+    *,
+    memory_dir_override: str | None = None,
+) -> LoadedMemory:
+    root, manifest_path = _resolve_memory_root(spec, memory_dir_override)
+    manifest = _read_memory_manifest(manifest_path)
+    build_path, build = _read_memory_build_metadata(root)
+    contract_index_path, contract_index, source_schema_paths, contracts = (
+        _read_memory_contract_index(
+            root,
+            manifest["memory"],
+            cast(int, build["contract_count"]),
+        )
+    )
+
+    return {
+        "kind": "memory",
+        "name": manifest["name"],
+        "version": manifest["version"],
+        "description": cast(str | None, manifest.get("description")),
+        "root": str(root),
+        "manifestPath": str(manifest_path),
+        "manifest": manifest,
+        "memory": manifest["memory"],
+        "buildPath": str(build_path),
+        "build": build,
+        "contractIndexPath": str(contract_index_path),
+        "contractIndex": contract_index,
+        "sourceSchemaPaths": source_schema_paths,
+        "contracts": contracts,
+    }
+
+
+def load_memory_contract(
+    memory_package: LoadedMemory,
+    *,
+    space: str,
+    record_type: str,
+) -> MemoryContractSchema:
+    contract_ref = next(
+        (
+            entry
+            for entry in memory_package["contracts"]
+            if entry["space"] == space and entry["recordType"] == record_type
+        ),
+        None,
+    )
+    if contract_ref is None:
+        raise ValueError(
+            f'Resolved memory contract "{space}:{record_type}" was not found in memory/contracts/index.json.'
+        )
+    return cast(
+        MemoryContractSchema,
+        _read_json_file(Path(contract_ref["path"]), f'memory contract "{space}:{record_type}"'),
+    )
