@@ -197,6 +197,8 @@ print(profile_contract)
 - parsed `memory/contracts/index.json`
 - absolute paths for declared source schemas and indexed resolved contracts
 
+It is a metadata and contract loader only. It does not provide live record CRUD, retention enforcement, trigger execution, or a hosted memory runtime.
+
 `load_memory_contract()` loads one indexed resolved contract on demand by `space` + `record_type`.
 
 ### `load()` stays tool-only
