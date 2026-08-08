@@ -11,6 +11,7 @@ __all__ = [
     "load_knowledge",
     "load_memory",
     "load_memory_contract",
+    "load_profile",
     "load_skill",
     "to_langchain_tool",
 ]
@@ -18,7 +19,15 @@ __all__ = [
 # Real exports
 from importlib.metadata import PackageNotFoundError, version
 
-from .core import load, load_agent, load_knowledge, load_memory, load_memory_contract, load_skill
+from .core import (
+    load,
+    load_agent,
+    load_knowledge,
+    load_memory,
+    load_memory_contract,
+    load_profile,
+    load_skill,
+)
 
 try:
     __version__ = version("agentpm")

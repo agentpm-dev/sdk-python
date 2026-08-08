@@ -209,6 +209,38 @@ def _write_installed_memory(base_dir: Path, spec: str) -> None:
     )
 
 
+def _write_installed_profile(
+    base_dir: Path,
+    spec: str,
+    profile: dict[str, object] | None = None,
+) -> None:
+    package_name, version = _split_spec(spec)
+    root = base_dir / package_name / version
+    manifest_name = package_name.split("/", 1)[1]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "profile",
+                "name": manifest_name,
+                "version": version,
+                "description": "Installed profile fixture",
+                "profile": profile
+                or {
+                    "identity": {"role": "Support agent"},
+                    "objectives": ["Help users move forward"],
+                    "communication": {
+                        "tone": ["calm"],
+                        "verbosity": "balanced",
+                    },
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(scope="module")  # type: ignore[misc]
 def tmp_agent_workspace() -> Iterator[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="agentpm-sdk-py-agent-")).resolve()
@@ -226,6 +258,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
     skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
     knowledge_dir = tmp_agent_workspace / ".agentpm" / "knowledge"
     memory_dir = tmp_agent_workspace / ".agentpm" / "memory"
+    profile_dir = tmp_agent_workspace / ".agentpm" / "profiles"
     lockfile_path = tmp_agent_workspace / "agent.lock"
     agent_spec = "@zack/support-agent@0.1.0"
 
@@ -233,6 +266,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
     _write_installed_skill(skills_dir, "@zack/triage-skill@0.1.0")
     _write_installed_knowledge(knowledge_dir, "@zack/python-docs@0.1.0", "vector")
     _write_installed_memory(memory_dir, "@zack/profile-memory@0.1.0")
+    _write_installed_profile(profile_dir, "@zack/support-style@0.1.0")
     _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
     lockfile_path.write_text(
         json.dumps(
@@ -270,6 +304,12 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
                         "version": "0.1.0",
                         "integrity": "sha256-memory",
                     },
+                    "profile:@zack/support-style@0.1.0": {
+                        "kind": "profile",
+                        "name": "@zack/support-style",
+                        "version": "0.1.0",
+                        "integrity": "sha256-profile",
+                    },
                 },
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
@@ -277,6 +317,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
                         "skills": ["skill:@zack/triage-skill@0.1.0"],
                         "knowledge": ["knowledge:@zack/python-docs@0.1.0"],
                         "memory": ["memory:@zack/profile-memory@0.1.0"],
+                        "profiles": ["profile:@zack/support-style@0.1.0"],
                         "reserved": {
                             "knowledge": [],
                             "memory": [],
@@ -297,6 +338,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
         tool_dir_override=str(tools_dir),
         knowledge_dir_override=str(knowledge_dir),
         memory_dir_override=str(memory_dir),
+        profile_dir_override=str(profile_dir),
         lockfile_override=str(lockfile_path),
     )
 
@@ -350,18 +392,43 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
             "manifestPath": str(memory_dir / "@zack" / "profile-memory" / "0.1.0" / "agent.json"),
         }
     ]
+    assert loaded["resolvedProfiles"] == [
+        {
+            "packageKey": "profile:@zack/support-style@0.1.0",
+            "kind": "profile",
+            "name": "@zack/support-style",
+            "version": "0.1.0",
+            "integrity": "sha256-profile",
+            "root": str(profile_dir / "@zack" / "support-style" / "0.1.0"),
+            "manifestPath": str(profile_dir / "@zack" / "support-style" / "0.1.0" / "agent.json"),
+        }
+    ]
 
 
 def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> None:
     tools_dir = tmp_agent_workspace / ".agentpm" / "tools"
     agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
     skills_dir = tmp_agent_workspace / ".agentpm" / "skills"
+    profile_dir = tmp_agent_workspace / ".agentpm" / "profiles"
     lockfile_path = tmp_agent_workspace / "agent-range.lock"
     exact_spec = "@zack/support-agent@0.1.0"
     newer_spec = "@zack/support-agent@0.2.0"
 
     _write_installed_tool(tools_dir, "@zack/capitalize@0.1.0")
     _write_installed_skill(skills_dir, "@zack/triage-skill@0.2.0")
+    _write_installed_profile(profile_dir, "@zack/support-style@0.1.0")
+    _write_installed_profile(
+        profile_dir,
+        "@zack/escalation-style@0.2.0",
+        {
+            "identity": {"role": "Escalation reviewer"},
+            "objectives": ["Keep escalations concise"],
+            "communication": {
+                "tone": ["direct"],
+                "verbosity": "concise",
+            },
+        },
+    )
     _write_installed_agent(agents_dir, exact_spec, "@zack/triage-skill@0.1.0")
     _write_installed_agent(agents_dir, newer_spec, "@zack/triage-skill@0.2.0")
     lockfile_path.write_text(
@@ -394,11 +461,24 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
                         "version": "0.2.0",
                         "integrity": "sha256-skill-2",
                     },
+                    "profile:@zack/support-style@0.1.0": {
+                        "kind": "profile",
+                        "name": "@zack/support-style",
+                        "version": "0.1.0",
+                        "integrity": "sha256-profile",
+                    },
+                    "profile:@zack/escalation-style@0.2.0": {
+                        "kind": "profile",
+                        "name": "@zack/escalation-style",
+                        "version": "0.2.0",
+                        "integrity": "sha256-profile-2",
+                    },
                 },
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
                         "tools": ["tool:@zack/capitalize@0.1.0"],
                         "skills": [],
+                        "profiles": ["profile:@zack/support-style@0.1.0"],
                         "reserved": {
                             "knowledge": [],
                             "memory": [],
@@ -408,6 +488,10 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
                     "agent:@zack/support-agent@0.2.0": {
                         "tools": ["tool:@zack/capitalize@0.1.0"],
                         "skills": ["skill:@zack/triage-skill@0.2.0"],
+                        "profiles": [
+                            "profile:@zack/support-style@0.1.0",
+                            "profile:@zack/escalation-style@0.2.0",
+                        ],
                         "reserved": {
                             "knowledge": [],
                             "memory": [],
@@ -426,6 +510,7 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
         agent_dir_override=str(agents_dir),
         skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
+        profile_dir_override=str(profile_dir),
         lockfile_override=str(lockfile_path),
     )
     ranged = load_agent(
@@ -433,13 +518,16 @@ def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> Non
         agent_dir_override=str(agents_dir),
         skill_dir_override=str(skills_dir),
         tool_dir_override=str(tools_dir),
+        profile_dir_override=str(profile_dir),
         lockfile_override=str(lockfile_path),
     )
 
     assert latest["manifest"]["version"] == "0.2.0"
     assert latest["resolvedSkills"][0]["version"] == "0.2.0"
+    assert [entry["version"] for entry in latest["resolvedProfiles"]] == ["0.1.0", "0.2.0"]
     assert ranged["manifest"]["version"] == "0.2.0"
     assert ranged["resolvedSkills"][0]["version"] == "0.2.0"
+    assert [entry["version"] for entry in ranged["resolvedProfiles"]] == ["0.1.0", "0.2.0"]
 
 
 def test_load_agent_keeps_memory_refs_when_package_is_missing_on_disk(
@@ -500,6 +588,70 @@ def test_load_agent_keeps_memory_refs_when_package_is_missing_on_disk(
             "name": "@zack/missing-memory",
             "version": "0.9.0",
             "integrity": "sha256-missing-memory",
+            "root": None,
+            "manifestPath": None,
+        }
+    ]
+
+
+def test_load_agent_keeps_profile_refs_when_package_is_missing_on_disk(
+    tmp_agent_workspace: Path,
+) -> None:
+    agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    profile_dir = tmp_agent_workspace / ".agentpm" / "profiles"
+    lockfile_path = tmp_agent_workspace / "agent-missing-profile.lock"
+    agent_spec = "@zack/support-agent@0.1.0"
+
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
+    lockfile_path.write_text(
+        json.dumps(
+            {
+                "lockfile_version": 3,
+                "generated": "2026-05-23T00:00:00Z",
+                "packages": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "kind": "agent",
+                        "name": "@zack/support-agent",
+                        "version": "0.1.0",
+                        "integrity": "sha256-agent",
+                    },
+                    "profile:@zack/missing-style@0.9.0": {
+                        "kind": "profile",
+                        "name": "@zack/missing-style",
+                        "version": "0.9.0",
+                        "integrity": "sha256-missing-profile",
+                    },
+                },
+                "roots": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "profiles": ["profile:@zack/missing-style@0.9.0"],
+                        "reserved": {
+                            "knowledge": [],
+                            "memory": [],
+                            "profiles": [],
+                        },
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_agent(
+        agent_spec,
+        agent_dir_override=str(agents_dir),
+        profile_dir_override=str(profile_dir),
+        lockfile_override=str(lockfile_path),
+    )
+
+    assert loaded["resolvedProfiles"] == [
+        {
+            "packageKey": "profile:@zack/missing-style@0.9.0",
+            "kind": "profile",
+            "name": "@zack/missing-style",
+            "version": "0.9.0",
+            "integrity": "sha256-missing-profile",
             "root": None,
             "manifestPath": None,
         }
