@@ -224,6 +224,32 @@ def _write_memory_package(base_dir: Path, spec: str) -> None:
     )
 
 
+def _write_profile_package(base_dir: Path, spec: str) -> None:
+    name, version = _split_spec(spec)
+    root = base_dir / name / version
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "profile",
+                "name": name.split("/", 1)[1],
+                "version": version,
+                "description": "Profile fixture",
+                "profile": {
+                    "identity": {"role": "Support agent"},
+                    "objectives": ["Help users move forward"],
+                    "communication": {
+                        "tone": ["calm"],
+                        "verbosity": "balanced",
+                    },
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(scope="module")  # type: ignore[misc]  # pytest decorator is untyped
 def tmp_tools_dir() -> Iterator[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="agentpm-sdk-pytest-")).resolve()
@@ -458,3 +484,20 @@ def test_load_rejects_installed_memory_specs(tmp_tools_dir: Path) -> None:
         import os
 
         os.environ.pop("AGENTPM_MEMORY_DIR", None)
+
+
+def test_load_rejects_installed_profile_specs(tmp_tools_dir: Path) -> None:
+    profile_dir = tmp_tools_dir / "profiles"
+    profile_spec = "@zack/support-style@0.1.0"
+    _write_profile_package(profile_dir, profile_spec)
+
+    try:
+        import os
+
+        os.environ["AGENTPM_PROFILE_DIR"] = str(profile_dir)
+        with pytest.raises(ValueError, match="load_profile"):
+            load(profile_spec, tool_dir_override=str(tmp_tools_dir))
+    finally:
+        import os
+
+        os.environ.pop("AGENTPM_PROFILE_DIR", None)

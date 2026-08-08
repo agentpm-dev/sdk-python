@@ -260,6 +260,68 @@ class MemoryMeta(TypedDict, total=False):
     memory: Required[MemoryMetadata]
 
 
+class ProfileIdentity(TypedDict, total=False):
+    role: Required[str]
+    description: NotRequired[str]
+    expertise: NotRequired[list[str]]
+
+
+class ProfileAudience(TypedDict, total=False):
+    description: NotRequired[str]
+    assumed_knowledge: NotRequired[str]
+    adaptation: NotRequired[list[str]]
+
+
+class ProfileVocabulary(TypedDict, total=False):
+    prefer: NotRequired[list[str]]
+    avoid: NotRequired[list[str]]
+
+
+class ProfileCommunication(TypedDict, total=False):
+    tone: Required[list[str]]
+    verbosity: Required[Literal["concise", "balanced", "detailed"]]
+    guidelines: NotRequired[list[str]]
+    formatting: NotRequired[list[str]]
+    vocabulary: NotRequired[ProfileVocabulary]
+
+
+class ProfileConstraint(TypedDict):
+    id: str
+    strength: Literal["required", "preferred"]
+    instruction: str
+
+
+class ProfileCapabilityHints(TypedDict, total=False):
+    tool_use: NotRequired[bool]
+    structured_output: NotRequired[bool]
+    multimodal_input: NotRequired[bool]
+
+
+class ProfileCompatibility(TypedDict, total=False):
+    minimum_context_tokens: NotRequired[int]
+    requires: NotRequired[ProfileCapabilityHints]
+    recommends: NotRequired[ProfileCapabilityHints]
+
+
+class ProfileMetadata(TypedDict, total=False):
+    identity: Required[ProfileIdentity]
+    objectives: Required[list[str]]
+    principles: NotRequired[list[str]]
+    audience: NotRequired[ProfileAudience]
+    communication: Required[ProfileCommunication]
+    boundaries: NotRequired[list[str]]
+    constraints: NotRequired[list[ProfileConstraint]]
+    compatibility: NotRequired[ProfileCompatibility]
+
+
+class ProfileMeta(TypedDict, total=False):
+    kind: Required[Literal["profile"]]
+    name: Required[str]
+    version: Required[str]
+    description: NotRequired[str]
+    profile: Required[ProfileMetadata]
+
+
 class MemoryBuildSourceSchemaEntry(TypedDict):
     path: str
     sha256: str
@@ -346,6 +408,16 @@ class ResolvedAgentMemoryRef(TypedDict):
     manifestPath: str | None
 
 
+class ResolvedAgentProfileRef(TypedDict):
+    packageKey: str
+    kind: Literal["profile"]
+    name: str
+    version: str
+    integrity: str
+    root: str | None
+    manifestPath: str | None
+
+
 class LoadedAgent(TypedDict):
     root: str
     manifestPath: str
@@ -354,6 +426,7 @@ class LoadedAgent(TypedDict):
     resolvedSkills: list[ResolvedAgentSkillRef]
     resolvedKnowledge: list[ResolvedAgentKnowledgeRef]
     resolvedMemory: list[ResolvedAgentMemoryRef]
+    resolvedProfiles: list[ResolvedAgentProfileRef]
     reserved: ReservedReferences
 
 
@@ -415,3 +488,14 @@ class LoadedMemory(TypedDict):
     contractIndex: MemoryContractIndex
     sourceSchemaPaths: list[str]
     contracts: list[LoadedMemoryContractRef]
+
+
+class LoadedProfile(TypedDict):
+    kind: Literal["profile"]
+    name: str
+    version: str
+    description: str | None
+    root: str
+    manifestPath: str
+    manifest: ProfileMeta
+    profile: ProfileMetadata
