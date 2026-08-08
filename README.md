@@ -128,6 +128,8 @@ Compatibility note:
 - `resolvedKnowledge` is populated from the modern first-class `root.knowledge` entries in `agent.lock`.
 - `reserved.knowledge` is legacy pass-through metadata from older lockfile shapes. For current installs, treat `resolvedKnowledge` as the authoritative Knowledge dependency list and expect `reserved.knowledge` to usually be empty.
 - If your workspace still has an older pre-Knowledge lockfile shape where Knowledge refs only exist under `reserved.knowledge`, rerun `agentpm install` to rewrite the lockfile before expecting `resolvedKnowledge` to be populated.
+- `resolvedProfiles` is populated from the modern first-class `root.profiles` entries in `agent.lock`.
+- `reserved.profiles` is legacy pass-through metadata from older lockfile shapes. For current installs, treat `resolvedProfiles` as the authoritative Profile dependency list and expect `reserved.profiles` to usually be empty.
 
 This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 
