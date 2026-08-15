@@ -30,11 +30,14 @@ from .types import (
     KnowledgeMeta,
     LoadedAgent,
     LoadedKnowledge,
+    LoadedLoop,
     LoadedMemory,
     LoadedMemoryContractRef,
     LoadedProfile,
     LoadedSkill,
     LoadedWithMeta,
+    LoopMeta,
+    LoopMetadata,
     Manifest,
     MemoryBuildMetadata,
     MemoryContractIndex,
@@ -45,6 +48,7 @@ from .types import (
     ProfileMetadata,
     ReservedReferences,
     ResolvedAgentKnowledgeRef,
+    ResolvedAgentLoopRef,
     ResolvedAgentMemoryRef,
     ResolvedAgentProfileRef,
     ResolvedAgentSkillRef,
@@ -701,6 +705,74 @@ def _resolve_profile_root(spec: str, profile_dir_override: str | None) -> tuple[
     )
 
 
+def _resolve_loop_root(spec: str, loop_dir_override: str | None) -> tuple[Path, Path]:
+    at = spec.rfind("@")
+    if at <= 0 or at == len(spec) - 1:
+        raise ValueError(f'Invalid loop spec "{spec}". Expected "@scope/name@version".')
+
+    selector = spec[at + 1 :].strip()
+    name = spec[:at]
+
+    project_root = find_project_root(Path.cwd())
+
+    candidates: list[Path] = []
+    if loop_dir_override:
+        candidates.append(Path(loop_dir_override))
+
+    env_dir = os.getenv("AGENTPM_LOOP_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "loops")
+    candidates.append(Path.home() / ".agentpm" / "loops")
+
+    try:
+        if selector and selector.lower() != "latest":
+            VersionInfo.parse(selector)
+            for base in candidates:
+                hit = _find_installed(base, name, selector)
+                if hit:
+                    return hit
+            raise FileNotFoundError(
+                f'Loop package "{spec}" not found in .agentpm/loops (or overrides).'
+            )
+    except ValueError:
+        normalized = _normalize_selector(selector)
+        try:
+            _ = all(semver_match("0.0.0", token) for token in normalized.split() if token)
+        except ValueError:
+            raise ValueError(
+                f'Invalid version/range "{selector}". Use exact (e.g. 0.1.2), '
+                'a semver range (e.g. ^0.1), or "latest".'
+            ) from None
+
+    want_latest = (not selector) or (selector.lower() == "latest")
+
+    for base in candidates:
+        installed = _list_installed_versions(base, name)
+        if not installed:
+            continue
+
+        if want_latest:
+            picked = installed[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+            continue
+
+        satisfying = [v for v in installed if _version_satisfies(v, selector)]
+        if satisfying:
+            picked = sorted(satisfying, key=VersionInfo.parse, reverse=True)[0]
+            hit = _find_installed(base, name, picked)
+            if hit:
+                return hit
+
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f'No installed version of "{name}" matches "{selector or "latest"}". Searched: {searched}'
+    )
+
+
 def _read_manifest(p: Path) -> Manifest:
     m = json.loads(p.read_text(encoding="utf-8"))
     ep = m.get("entrypoint", {})
@@ -751,6 +823,16 @@ def _read_profile_manifest(p: Path) -> ProfileMeta:
     profile = manifest.get("profile")
     if not isinstance(profile, dict):
         raise ValueError(f"agent.json missing profile object at: {p}")
+    return manifest
+
+
+def _read_loop_manifest(p: Path) -> LoopMeta:
+    manifest = cast(LoopMeta, json.loads(p.read_text(encoding="utf-8")))
+    if manifest.get("kind") != "loop":
+        raise ValueError(f"agent.json is not a loop manifest at: {p}")
+    loop = manifest.get("loop")
+    if not isinstance(loop, dict):
+        raise ValueError(f"agent.json missing loop object at: {p}")
     return manifest
 
 
@@ -1071,6 +1153,28 @@ def _resolve_profile_installed_path(
 
     candidates.append(project_root / ".agentpm" / "profiles")
     candidates.append(Path.home() / ".agentpm" / "profiles")
+
+    for base in candidates:
+        hit = _find_installed(base, name, version)
+        if hit:
+            return hit
+    return None
+
+
+def _resolve_loop_installed_path(
+    name: str, version: str, loop_dir_override: str | None
+) -> tuple[Path, Path] | None:
+    project_root = find_project_root(Path.cwd())
+    candidates: list[Path] = []
+    if loop_dir_override:
+        candidates.append(Path(loop_dir_override))
+
+    env_dir = os.getenv("AGENTPM_LOOP_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    candidates.append(project_root / ".agentpm" / "loops")
+    candidates.append(Path.home() / ".agentpm" / "loops")
 
     for base in candidates:
         hit = _find_installed(base, name, version)
@@ -1462,25 +1566,39 @@ def load(
             except ValueError as knowledge_err:
                 if "load_knowledge" in str(knowledge_err):
                     raise knowledge_err
-                try:
-                    _resolve_memory_root(spec, None)
-                    raise ValueError(
-                        f'Package "{spec}" is Memory. load() is tool-only; use load_memory("{spec}") instead.'
-                    )
-                except ValueError as memory_err:
-                    if "load_memory" in str(memory_err):
-                        raise memory_err
-                    try:
-                        _resolve_profile_root(spec, None)
-                        raise ValueError(
-                            f'Package "{spec}" is a Profile. load() is tool-only; use load_profile("{spec}") instead.'
-                        )
-                    except ValueError as profile_err:
-                        if "load_profile" in str(profile_err):
-                            raise profile_err
-                raise err from skill_err
             except FileNotFoundError:
-                raise err from skill_err
+                pass
+            try:
+                _resolve_memory_root(spec, None)
+                raise ValueError(
+                    f'Package "{spec}" is Memory. load() is tool-only; use load_memory("{spec}") instead.'
+                )
+            except ValueError as memory_err:
+                if "load_memory" in str(memory_err):
+                    raise memory_err
+            except FileNotFoundError:
+                pass
+            try:
+                _resolve_loop_root(spec, None)
+                raise ValueError(
+                    f'Package "{spec}" is a Loop. load() is tool-only; use load_loop("{spec}") instead.'
+                )
+            except ValueError as loop_err:
+                if "load_loop" in str(loop_err):
+                    raise loop_err
+            except FileNotFoundError:
+                pass
+            try:
+                _resolve_profile_root(spec, None)
+                raise ValueError(
+                    f'Package "{spec}" is a Profile. load() is tool-only; use load_profile("{spec}") instead.'
+                )
+            except ValueError as profile_err:
+                if "load_profile" in str(profile_err):
+                    raise profile_err
+            except FileNotFoundError:
+                pass
+            raise err from skill_err
         except FileNotFoundError:
             try:
                 _resolve_knowledge_root(spec, None)
@@ -1500,19 +1618,30 @@ def load(
                     if "load_memory" in str(memory_err):
                         raise memory_err
                 except FileNotFoundError:
-                    try:
-                        _resolve_profile_root(spec, None)
-                        raise ValueError(
-                            f'Package "{spec}" is a Profile. load() is tool-only; use load_profile("{spec}") instead.'
-                        )
-                    except ValueError as profile_err:
-                        if "load_profile" in str(profile_err):
-                            raise profile_err
-                    except FileNotFoundError:
-                        pass
+                    pass
+                try:
+                    _resolve_loop_root(spec, None)
+                    raise ValueError(
+                        f'Package "{spec}" is a Loop. load() is tool-only; use load_loop("{spec}") instead.'
+                    )
+                except ValueError as loop_err:
+                    if "load_loop" in str(loop_err):
+                        raise loop_err
+                except FileNotFoundError:
+                    pass
+                try:
+                    _resolve_profile_root(spec, None)
+                    raise ValueError(
+                        f'Package "{spec}" is a Profile. load() is tool-only; use load_profile("{spec}") instead.'
+                    )
+                except ValueError as profile_err:
+                    if "load_profile" in str(profile_err):
+                        raise profile_err
+                except FileNotFoundError:
+                    pass
             if isinstance(err, FileNotFoundError) and "not found in .agentpm/tools" in str(err):
                 raise FileNotFoundError(
-                    f'{err} If this package is a Skill, use load_skill("{spec}") instead. If it is Knowledge, use load_knowledge("{spec}") instead. If it is Memory, use load_memory("{spec}") instead. If it is a Profile, use load_profile("{spec}") instead.'
+                    f'{err} If this package is a Skill, use load_skill("{spec}") instead. If it is Knowledge, use load_knowledge("{spec}") instead. If it is Memory, use load_memory("{spec}") instead. If it is a Loop, use load_loop("{spec}") instead. If it is a Profile, use load_profile("{spec}") instead.'
                 ) from None
             raise err from None
     m = _read_manifest(manifest_path)
@@ -1601,6 +1730,7 @@ def load_agent(
     knowledge_dir_override: str | None = None,
     memory_dir_override: str | None = None,
     profile_dir_override: str | None = None,
+    loop_dir_override: str | None = None,
     lockfile_override: str | None = None,
 ) -> LoadedAgent:
     root, manifest_path = _resolve_agent_root(spec, agent_dir_override)
@@ -1742,6 +1872,24 @@ def load_agent(
             }
         )
 
+    resolved_loop: ResolvedAgentLoopRef | None = None
+    loop_key = root_entry.get("loop")
+    if isinstance(loop_key, str):
+        pkg = packages.get(loop_key)
+        if pkg and pkg.get("kind") == "loop":
+            installed = _resolve_loop_installed_path(
+                cast(str, pkg["name"]), cast(str, pkg["version"]), loop_dir_override
+            )
+            resolved_loop = {
+                "packageKey": loop_key,
+                "kind": "loop",
+                "name": cast(str, pkg["name"]),
+                "version": cast(str, pkg["version"]),
+                "integrity": cast(str, pkg["integrity"]),
+                "root": str(installed[0]) if installed else None,
+                "manifestPath": str(installed[1]) if installed else None,
+            }
+
     return {
         "root": str(root),
         "manifestPath": str(manifest_path),
@@ -1751,6 +1899,7 @@ def load_agent(
         "resolvedKnowledge": resolved_knowledge,
         "resolvedMemory": resolved_memory,
         "resolvedProfiles": resolved_profiles,
+        "resolvedLoop": resolved_loop,
         "reserved": reserved,
     }
 
@@ -2021,6 +2170,26 @@ def load_profile(
         "manifestPath": str(manifest_path),
         "manifest": manifest,
         "profile": cast(ProfileMetadata, manifest["profile"]),
+    }
+
+
+def load_loop(
+    spec: str,
+    *,
+    loop_dir_override: str | None = None,
+) -> LoadedLoop:
+    root, manifest_path = _resolve_loop_root(spec, loop_dir_override)
+    manifest = _read_loop_manifest(manifest_path)
+
+    return {
+        "kind": "loop",
+        "name": manifest["name"],
+        "version": manifest["version"],
+        "description": cast(str | None, manifest.get("description")),
+        "root": str(root),
+        "manifestPath": str(manifest_path),
+        "manifest": manifest,
+        "loop": cast(LoopMetadata, manifest["loop"]),
     }
 
 

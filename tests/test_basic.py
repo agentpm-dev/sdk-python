@@ -250,6 +250,29 @@ def _write_profile_package(base_dir: Path, spec: str) -> None:
     )
 
 
+def _write_loop_package(base_dir: Path, spec: str) -> None:
+    name, version = _split_spec(spec)
+    root = base_dir / name / version
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "loop",
+                "name": "incident-response-loop",
+                "version": version,
+                "description": "Loop fixture",
+                "loop": {
+                    "entry_phase": "assess",
+                    "phases": [{"id": "assess", "objective": "Assess the request."}],
+                    "transitions": [{"from": "assess", "on": "complete", "to": "$end"}],
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(scope="module")  # type: ignore[misc]  # pytest decorator is untyped
 def tmp_tools_dir() -> Iterator[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="agentpm-sdk-pytest-")).resolve()
@@ -437,6 +460,61 @@ def test_load_missing_skill_like_spec_suggests_load_skill(tmp_tools_dir: Path) -
         load("@zack/missing-skill@0.1.0", tool_dir_override=str(tmp_tools_dir))
 
 
+def test_load_preserves_original_error_when_malformed_skill_check_hits_downstream_missing_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentpm.core as core
+
+    tool_err = FileNotFoundError(
+        'Tool package "@zack/bad@oops" not found in .agentpm/tools (or overrides).'
+    )
+
+    monkeypatch.setattr(
+        core, "_resolve_tool_root", lambda spec, tool_dir_override: (_ for _ in ()).throw(tool_err)
+    )
+    monkeypatch.setattr(
+        core,
+        "_resolve_skill_root",
+        lambda spec, skill_dir_override: (_ for _ in ()).throw(
+            ValueError('Invalid version/range "oops". Use exact, range, or latest.')
+        ),
+    )
+    monkeypatch.setattr(
+        core,
+        "_resolve_knowledge_root",
+        lambda spec, knowledge_dir_override: (_ for _ in ()).throw(
+            FileNotFoundError("knowledge missing")
+        ),
+    )
+    monkeypatch.setattr(
+        core,
+        "_resolve_memory_root",
+        lambda spec, memory_dir_override: (_ for _ in ()).throw(
+            FileNotFoundError("memory missing")
+        ),
+    )
+    monkeypatch.setattr(
+        core,
+        "_resolve_loop_root",
+        lambda spec, loop_dir_override: (_ for _ in ()).throw(FileNotFoundError("loop missing")),
+    )
+    monkeypatch.setattr(
+        core,
+        "_resolve_profile_root",
+        lambda spec, profile_dir_override: (_ for _ in ()).throw(
+            FileNotFoundError("profile missing")
+        ),
+    )
+
+    with pytest.raises(FileNotFoundError, match="not found in \\.agentpm/tools") as exc_info:
+        load("@zack/bad@oops")
+
+    assert "knowledge missing" not in str(exc_info.value)
+    assert "memory missing" not in str(exc_info.value)
+    assert "loop missing" not in str(exc_info.value)
+    assert "profile missing" not in str(exc_info.value)
+
+
 def test_load_rejects_installed_knowledge_specs(tmp_tools_dir: Path) -> None:
     knowledge_dir = tmp_tools_dir / "knowledge"
     knowledge_spec = "@zack/python-docs@0.1.0"
@@ -501,3 +579,20 @@ def test_load_rejects_installed_profile_specs(tmp_tools_dir: Path) -> None:
         import os
 
         os.environ.pop("AGENTPM_PROFILE_DIR", None)
+
+
+def test_load_rejects_installed_loop_specs(tmp_tools_dir: Path) -> None:
+    loop_dir = tmp_tools_dir / "loops"
+    loop_spec = "@zack/incident-response-loop@0.1.0"
+    _write_loop_package(loop_dir, loop_spec)
+
+    try:
+        import os
+
+        os.environ["AGENTPM_LOOP_DIR"] = str(loop_dir)
+        with pytest.raises(ValueError, match="load_loop"):
+            load(loop_spec, tool_dir_override=str(tmp_tools_dir))
+    finally:
+        import os
+
+        os.environ.pop("AGENTPM_LOOP_DIR", None)

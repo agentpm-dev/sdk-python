@@ -71,6 +71,8 @@ class AgentMeta(TypedDict, total=False):
     knowledge: NotRequired[list[DependencyReference]]
     memory: NotRequired[list[DependencyReference]]
     profiles: NotRequired[list[DependencyReference]]
+    loop: NotRequired[DependencyReference]
+    bindings: NotRequired[AgentBindings]
 
 
 class SkillCompatibility(TypedDict, total=False):
@@ -322,6 +324,125 @@ class ProfileMeta(TypedDict, total=False):
     profile: Required[ProfileMetadata]
 
 
+class LoopPhaseAccessMemory(TypedDict, total=False):
+    read: NotRequired[bool]
+    write: NotRequired[bool]
+
+
+class LoopPhaseAccess(TypedDict, total=False):
+    tools: NotRequired[bool]
+    knowledge: NotRequired[bool]
+    memory: NotRequired[LoopPhaseAccessMemory]
+
+
+class LoopOutcome(TypedDict):
+    id: str
+    description: str
+
+
+class LoopPhase(TypedDict, total=False):
+    id: Required[str]
+    objective: Required[str]
+    access: NotRequired[LoopPhaseAccess]
+    outcomes: NotRequired[list[LoopOutcome]]
+
+
+LoopTransition = TypedDict(
+    "LoopTransition",
+    {
+        "from": str,
+        "on": str,
+        "to": str,
+    },
+)
+
+
+class LoopLimits(TypedDict, total=False):
+    max_steps: NotRequired[int]
+
+
+class LoopCheckpoint(TypedDict):
+    id: str
+    type: Literal["approval"]
+    before_phase: str
+    on_reject: str
+
+
+class LoopToolFailureRetryPolicy(TypedDict):
+    action: Literal["retry"]
+    max_retries: int
+    on_exhausted: Literal["fail_phase", "abort", "handoff"]
+
+
+class LoopToolFailureDirectPolicy(TypedDict):
+    action: Literal["fail_phase", "abort", "handoff"]
+
+
+LoopToolFailurePolicy = LoopToolFailureRetryPolicy | LoopToolFailureDirectPolicy
+
+
+class LoopPhaseFailurePolicy(TypedDict):
+    action: Literal["abort", "handoff"]
+
+
+class LoopErrorPolicy(TypedDict, total=False):
+    tool_failure: NotRequired[LoopToolFailurePolicy]
+    phase_failure: NotRequired[LoopPhaseFailurePolicy]
+
+
+class LoopMetadata(TypedDict, total=False):
+    archetype: NotRequired[str]
+    entry_phase: Required[str]
+    limits: NotRequired[LoopLimits]
+    phases: Required[list[LoopPhase]]
+    transitions: Required[list[LoopTransition]]
+    checkpoints: NotRequired[list[LoopCheckpoint]]
+    error_policy: NotRequired[LoopErrorPolicy]
+
+
+class LoopMeta(TypedDict, total=False):
+    kind: Required[Literal["loop"]]
+    name: Required[str]
+    version: Required[str]
+    description: NotRequired[str]
+    loop: Required[LoopMetadata]
+
+
+class AgentMemoryBinding(TypedDict, total=False):
+    package: Required[str]
+    spaces: NotRequired[list[str]]
+    operations: NotRequired[list[str]]
+
+
+class AgentBindingScope(TypedDict, total=False):
+    tools: NotRequired[list[str]]
+    skills: NotRequired[list[str]]
+    knowledge: NotRequired[list[str]]
+    memory: NotRequired[list[AgentMemoryBinding]]
+    profiles: NotRequired[list[str]]
+
+
+class AgentMcpBinding(TypedDict):
+    id: str
+    tools: list[str]
+
+
+class AgentConsumerContext(TypedDict):
+    file: str
+
+
+AgentBindings = TypedDict(
+    "AgentBindings",
+    {
+        "global": NotRequired[AgentBindingScope],
+        "phases": NotRequired[dict[str, AgentBindingScope]],
+        "mcp": NotRequired[list[AgentMcpBinding]],
+        "consumer_context": NotRequired[AgentConsumerContext],
+    },
+    total=False,
+)
+
+
 class MemoryBuildSourceSchemaEntry(TypedDict):
     path: str
     sha256: str
@@ -418,6 +539,16 @@ class ResolvedAgentProfileRef(TypedDict):
     manifestPath: str | None
 
 
+class ResolvedAgentLoopRef(TypedDict):
+    packageKey: str
+    kind: Literal["loop"]
+    name: str
+    version: str
+    integrity: str
+    root: str | None
+    manifestPath: str | None
+
+
 class LoadedAgent(TypedDict):
     root: str
     manifestPath: str
@@ -427,6 +558,7 @@ class LoadedAgent(TypedDict):
     resolvedKnowledge: list[ResolvedAgentKnowledgeRef]
     resolvedMemory: list[ResolvedAgentMemoryRef]
     resolvedProfiles: list[ResolvedAgentProfileRef]
+    resolvedLoop: ResolvedAgentLoopRef | None
     reserved: ReservedReferences
 
 
@@ -499,3 +631,14 @@ class LoadedProfile(TypedDict):
     manifestPath: str
     manifest: ProfileMeta
     profile: ProfileMetadata
+
+
+class LoadedLoop(TypedDict):
+    kind: Literal["loop"]
+    name: str
+    version: str
+    description: str | None
+    root: str
+    manifestPath: str
+    manifest: LoopMeta
+    loop: LoopMetadata
