@@ -1,6 +1,6 @@
 # AgentPM™ Python SDK
 
-A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, Memory, and Profile packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved dependency refs.
+A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, Memory, Profile, and Loop packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved dependency refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
 - 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool and skill refs from `agent.lock`.
@@ -8,6 +8,7 @@ A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, M
 - 🧠 **Loads installed Knowledge packages** from `.agentpm/knowledge` and exposes mode-specific metadata and canonical paths.
 - ♾️ **Loads installed Memory packages** from `.agentpm/memory` and exposes authored blueprint metadata, build metadata, contract indexes, and resolved contract paths.
 - 🎭 **Loads installed Profile packages** from `.agentpm/profiles` and exposes authored role, objective, and communication metadata.
+- 🔁 **Loads installed Loop packages** from `.agentpm/loops` and exposes authored phase, transition, and error-policy metadata.
 - 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
@@ -91,10 +92,19 @@ print(summarize({"text": "hello"})["summary"])
 ### Load an installed agent package
 
 ```python
-from agentpm import load, load_agent, load_knowledge, load_memory, load_profile, load_skill
+from agentpm import (
+    load,
+    load_agent,
+    load_knowledge,
+    load_loop,
+    load_memory,
+    load_profile,
+    load_skill,
+)
 
 agent = load_agent("@zack/support-agent@0.1.0")
 docs = load_knowledge("@zack/python-docs@0.1.0")
+loop = load_loop("@zack/incident-response-loop@0.3.0")
 memory = load_memory("@zack/profile-memory@0.1.0")
 profile = load_profile("@zack/support-style@0.1.0")
 first_skill = agent["resolvedSkills"][0]
@@ -103,8 +113,10 @@ first_tool = skill["resolvedTools"][0]
 tool = load(f'{first_tool["name"]}@{first_tool["version"]}')
 
 print(agent["resolvedKnowledge"])
+print(agent["resolvedLoop"])
 print(agent["resolvedMemory"])
 print(agent["resolvedProfiles"])
+print(loop["loop"]["transitions"])
 print(docs["knowledge"]["mode"])
 print(memory["contracts"])
 print(profile["profile"]["communication"])
@@ -115,6 +127,7 @@ print(profile["profile"]["communication"])
 - the installed agent manifest
 - the installed agent root path
 - `resolvedKnowledge` from `agent.lock`
+- `resolvedLoop` from `agent.lock`
 - `resolvedMemory` from `agent.lock`
 - `resolvedProfiles` from `agent.lock`
 - reserved refs (`knowledge`, `memory`, `profiles`) as metadata
@@ -128,8 +141,10 @@ Compatibility note:
 - `resolvedKnowledge` is populated from the modern first-class `root.knowledge` entries in `agent.lock`.
 - `reserved.knowledge` is legacy pass-through metadata from older lockfile shapes. For current installs, treat `resolvedKnowledge` as the authoritative Knowledge dependency list and expect `reserved.knowledge` to usually be empty.
 - If your workspace still has an older pre-Knowledge lockfile shape where Knowledge refs only exist under `reserved.knowledge`, rerun `agentpm install` to rewrite the lockfile before expecting `resolvedKnowledge` to be populated.
+- `resolvedLoop` is populated from the modern first-class `root.loop` entry in `agent.lock`.
 - `resolvedProfiles` is populated from the modern first-class `root.profiles` entries in `agent.lock`.
 - `reserved.profiles` is legacy pass-through metadata from older lockfile shapes. For current installs, treat `resolvedProfiles` as the authoritative Profile dependency list and expect `reserved.profiles` to usually be empty.
+- `manifest["loop"]` and `manifest["bindings"]` preserve the authored declarative metadata from the installed `agent.json`.
 
 This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 
@@ -226,6 +241,25 @@ print(profile["profile"]["communication"])
 - the installed package root path
 - parsed authored `profile` metadata
 
+### Load an installed Loop package
+
+```python
+from agentpm import load_loop
+
+loop = load_loop("@zack/incident-response-loop@0.3.0")
+
+print(loop["loop"]["entry_phase"])
+print(loop["loop"]["phases"])
+print(loop["loop"]["transitions"])
+print(loop["loop"]["error_policy"])
+```
+
+`load_loop()` returns an inspectable Loop object with:
+
+- the installed loop manifest
+- the installed package root path
+- parsed authored `loop` metadata
+
 ### `load()` stays tool-only
 
 ```python
@@ -242,6 +276,9 @@ load("@zack/profile-memory@0.1.0")
 
 load("@zack/support-style@0.1.0")
 # raises: use load_profile("@zack/support-style@0.1.0") instead
+
+load("@zack/incident-response-loop@0.3.0")
+# raises: use load_loop("@zack/incident-response-loop@0.3.0") instead
 ```
 
 ### Optional: LangChain adapter

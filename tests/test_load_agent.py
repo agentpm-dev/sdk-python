@@ -60,7 +60,14 @@ def _write_installed_skill(base_dir: Path, spec: str) -> None:
     )
 
 
-def _write_installed_agent(base_dir: Path, spec: str, skill_ref: str) -> None:
+def _write_installed_agent(
+    base_dir: Path,
+    spec: str,
+    skill_ref: str,
+    *,
+    loop: str | dict[str, object] | None = None,
+    bindings: dict[str, object] | None = None,
+) -> None:
     package_name, version = _split_spec(spec)
     root = base_dir / package_name / version
     manifest_name = package_name.split("/", 1)[1]
@@ -78,6 +85,8 @@ def _write_installed_agent(base_dir: Path, spec: str, skill_ref: str) -> None:
                 "knowledge": [],
                 "memory": [],
                 "profiles": [],
+                **({"loop": loop} if loop is not None else {}),
+                **({"bindings": bindings} if bindings is not None else {}),
             },
             indent=2,
         ),
@@ -241,6 +250,31 @@ def _write_installed_profile(
     )
 
 
+def _write_installed_loop(base_dir: Path, spec: str, loop: dict[str, object] | None = None) -> None:
+    package_name, version = _split_spec(spec)
+    root = base_dir / package_name / version
+    manifest_name = package_name.split("/", 1)[1]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "loop",
+                "name": manifest_name,
+                "version": version,
+                "description": "Installed loop fixture",
+                "loop": loop
+                or {
+                    "entry_phase": "assess",
+                    "phases": [{"id": "assess", "objective": "Assess the issue."}],
+                    "transitions": [{"from": "assess", "on": "complete", "to": "$end"}],
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture(scope="module")  # type: ignore[misc]
 def tmp_agent_workspace() -> Iterator[Path]:
     tmp = Path(tempfile.mkdtemp(prefix="agentpm-sdk-py-agent-")).resolve()
@@ -259,6 +293,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
     knowledge_dir = tmp_agent_workspace / ".agentpm" / "knowledge"
     memory_dir = tmp_agent_workspace / ".agentpm" / "memory"
     profile_dir = tmp_agent_workspace / ".agentpm" / "profiles"
+    loop_dir = tmp_agent_workspace / ".agentpm" / "loops"
     lockfile_path = tmp_agent_workspace / "agent.lock"
     agent_spec = "@zack/support-agent@0.1.0"
 
@@ -267,7 +302,54 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
     _write_installed_knowledge(knowledge_dir, "@zack/python-docs@0.1.0", "vector")
     _write_installed_memory(memory_dir, "@zack/profile-memory@0.1.0")
     _write_installed_profile(profile_dir, "@zack/support-style@0.1.0")
-    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
+    _write_installed_loop(
+        loop_dir,
+        "@zack/incident-response-loop@0.3.0",
+        {
+            "archetype": "investigate_review_respond",
+            "entry_phase": "assess",
+            "phases": [
+                {
+                    "id": "assess",
+                    "objective": "Assess the issue and decide whether work should proceed.",
+                    "outcomes": [
+                        {"id": "proceed", "description": "The issue should move forward."},
+                        {"id": "handoff", "description": "The issue should be handed off."},
+                    ],
+                },
+                {"id": "execute", "objective": "Complete the requested work."},
+            ],
+            "transitions": [
+                {"from": "assess", "on": "proceed", "to": "execute"},
+                {"from": "assess", "on": "handoff", "to": "$handoff"},
+                {"from": "execute", "on": "complete", "to": "$end"},
+            ],
+        },
+    )
+    _write_installed_agent(
+        agents_dir,
+        agent_spec,
+        "@zack/triage-skill@0.1.0",
+        loop="@zack/incident-response-loop",
+        bindings={
+            "global": {
+                "tools": ["@zack/capitalize"],
+                "knowledge": ["@zack/python-docs"],
+                "memory": [{"package": "@zack/profile-memory", "spaces": ["profile"]}],
+                "profiles": ["@zack/support-style"],
+            },
+            "phases": {
+                "execute": {
+                    "skills": ["@zack/triage-skill"],
+                    "memory": [
+                        {"package": "@zack/profile-memory", "operations": ["refresh_profile"]}
+                    ],
+                }
+            },
+            "mcp": [{"id": "workspace-tools", "tools": ["@zack/capitalize"]}],
+            "consumer_context": {"file": "runtime/context.json"},
+        },
+    )
     lockfile_path.write_text(
         json.dumps(
             {
@@ -310,6 +392,12 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
                         "version": "0.1.0",
                         "integrity": "sha256-profile",
                     },
+                    "loop:@zack/incident-response-loop@0.3.0": {
+                        "kind": "loop",
+                        "name": "@zack/incident-response-loop",
+                        "version": "0.3.0",
+                        "integrity": "sha256-loop",
+                    },
                 },
                 "roots": {
                     "agent:@zack/support-agent@0.1.0": {
@@ -318,6 +406,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
                         "knowledge": ["knowledge:@zack/python-docs@0.1.0"],
                         "memory": ["memory:@zack/profile-memory@0.1.0"],
                         "profiles": ["profile:@zack/support-style@0.1.0"],
+                        "loop": "loop:@zack/incident-response-loop@0.3.0",
                         "reserved": {
                             "knowledge": [],
                             "memory": [],
@@ -339,6 +428,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
         knowledge_dir_override=str(knowledge_dir),
         memory_dir_override=str(memory_dir),
         profile_dir_override=str(profile_dir),
+        loop_dir_override=str(loop_dir),
         lockfile_override=str(lockfile_path),
     )
 
@@ -403,6 +493,32 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
             "manifestPath": str(profile_dir / "@zack" / "support-style" / "0.1.0" / "agent.json"),
         }
     ]
+    assert loaded["resolvedLoop"] == {
+        "packageKey": "loop:@zack/incident-response-loop@0.3.0",
+        "kind": "loop",
+        "name": "@zack/incident-response-loop",
+        "version": "0.3.0",
+        "integrity": "sha256-loop",
+        "root": str(loop_dir / "@zack" / "incident-response-loop" / "0.3.0"),
+        "manifestPath": str(loop_dir / "@zack" / "incident-response-loop" / "0.3.0" / "agent.json"),
+    }
+    assert loaded["manifest"]["loop"] == "@zack/incident-response-loop"
+    assert loaded["manifest"]["bindings"] == {
+        "global": {
+            "tools": ["@zack/capitalize"],
+            "knowledge": ["@zack/python-docs"],
+            "memory": [{"package": "@zack/profile-memory", "spaces": ["profile"]}],
+            "profiles": ["@zack/support-style"],
+        },
+        "phases": {
+            "execute": {
+                "skills": ["@zack/triage-skill"],
+                "memory": [{"package": "@zack/profile-memory", "operations": ["refresh_profile"]}],
+            }
+        },
+        "mcp": [{"id": "workspace-tools", "tools": ["@zack/capitalize"]}],
+        "consumer_context": {"file": "runtime/context.json"},
+    }
 
 
 def test_load_agent_resolves_latest_and_ranges(tmp_agent_workspace: Path) -> None:
@@ -656,6 +772,68 @@ def test_load_agent_keeps_profile_refs_when_package_is_missing_on_disk(
             "manifestPath": None,
         }
     ]
+
+
+def test_load_agent_keeps_loop_ref_when_package_is_missing_on_disk(
+    tmp_agent_workspace: Path,
+) -> None:
+    agents_dir = tmp_agent_workspace / ".agentpm" / "agents"
+    loop_dir = tmp_agent_workspace / ".agentpm" / "loops"
+    lockfile_path = tmp_agent_workspace / "agent-missing-loop.lock"
+    agent_spec = "@zack/support-agent@0.1.0"
+
+    _write_installed_agent(agents_dir, agent_spec, "@zack/triage-skill@0.1.0")
+    lockfile_path.write_text(
+        json.dumps(
+            {
+                "lockfile_version": 3,
+                "generated": "2026-05-23T00:00:00Z",
+                "packages": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "kind": "agent",
+                        "name": "@zack/support-agent",
+                        "version": "0.1.0",
+                        "integrity": "sha256-agent",
+                    },
+                    "loop:@zack/missing-loop@0.9.0": {
+                        "kind": "loop",
+                        "name": "@zack/missing-loop",
+                        "version": "0.9.0",
+                        "integrity": "sha256-missing-loop",
+                    },
+                },
+                "roots": {
+                    "agent:@zack/support-agent@0.1.0": {
+                        "loop": "loop:@zack/missing-loop@0.9.0",
+                        "reserved": {
+                            "knowledge": [],
+                            "memory": [],
+                            "profiles": [],
+                        },
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_agent(
+        agent_spec,
+        agent_dir_override=str(agents_dir),
+        loop_dir_override=str(loop_dir),
+        lockfile_override=str(lockfile_path),
+    )
+
+    assert loaded["resolvedLoop"] == {
+        "packageKey": "loop:@zack/missing-loop@0.9.0",
+        "kind": "loop",
+        "name": "@zack/missing-loop",
+        "version": "0.9.0",
+        "integrity": "sha256-missing-loop",
+        "root": None,
+        "manifestPath": None,
+    }
 
 
 def test_load_agent_ignores_legacy_reserved_skills_entries(
