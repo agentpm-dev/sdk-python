@@ -240,6 +240,7 @@ class MemoryOperation(TypedDict, total=False):
     description: NotRequired[str]
     inputs: NotRequired[list[MemoryOperationRef]]
     output: NotRequired[MemoryOperationRef]
+    output_mode: NotRequired[str]
     targets: NotRequired[list[MemoryOperationTarget]]
     trigger: NotRequired[MemoryOperationTrigger]
     source_handling: NotRequired[str]
