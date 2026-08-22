@@ -48,6 +48,18 @@ def _write_installed_memory(base_dir: Path, spec: str) -> Path:
                             "retrieval": {"modes": ["key"]},
                         }
                     },
+                    "operations": {
+                        "refresh_profile": {
+                            "type": "transform",
+                            "inputs": [{"space": "profile", "record_type": "user_preference"}],
+                            "output": {
+                                "space": "profile",
+                                "record_type": "user_preference",
+                            },
+                            "output_mode": "replace_input",
+                            "source_handling": "retain",
+                        }
+                    },
                 },
             },
             indent=2,
@@ -130,6 +142,7 @@ def test_load_memory_loads_metadata_build_index_and_contract_refs(
 
     assert loaded["kind"] == "memory"
     assert loaded["memory"]["spaces"]["profile"]["model"] == "document"
+    assert loaded["memory"]["operations"]["refresh_profile"]["output_mode"] == "replace_input"
     assert loaded["build"]["type"] == "agentpm-memory-contracts"
     assert loaded["contractIndex"]["type"] == "agentpm-memory-contract-index"
     assert loaded["sourceSchemaPaths"] == [
