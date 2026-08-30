@@ -153,6 +153,45 @@ This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 3. optionally load a resolved skill package
 4. choose which tool packages to `load()`
 
+### Run Harness over the machine protocol
+
+```python
+from agentpm import BeforeToolCallDecision, BeforeToolCallInput, HarnessClient
+
+harness = HarnessClient(agent="@zack/support-agent@0.1.0")
+
+
+def model_provider(request):
+    return {
+        "id": "turn-1",
+        "assistant_content": "Handled by the host model.",
+        "actions": [],
+        "usage": {},
+        "finish_reason": "stop",
+        "provider_metadata": {"model": request["selection"]["model"]},
+    }
+
+
+def before_tool_call(input: BeforeToolCallInput) -> BeforeToolCallDecision:
+    return {"decision": "continue", "patch": {"arguments": input["arguments"]}}
+
+
+harness.register_model_provider("company-model", model_provider)
+harness.on_before_tool_call(before_tool_call)
+harness.on_approval(lambda checkpoint: "approve")
+
+result = harness.run("Use the configured agent.")
+harness.shutdown()
+
+print(result)
+```
+
+`agent` is optional. When set, it is passed to `agentpm harness` as either an installed Agent package ref such as `@zack/support-agent@0.1.0` or a local manifest path such as `./agent.json`; when omitted, Harness uses its normal workspace discovery/default Agent selection. Register host services before starting a run. The SDK launches `agentpm harness --machine`, correlates request/response frames, streams Harness events, and routes host-service callbacks for model providers, hooks, and approvals.
+
+The convenience Hook helpers use contract-specific type hints. `on_before_model_request` may return `context_sections` and `provider_options`, `on_before_tool_selection` may return `candidate_ids`, and `on_before_tool_call` may return replacement `arguments`. A returned object must include `decision: "continue"` or `decision: "reject"`; returning `None` is treated as an explicit continue with no patch.
+
+Host capability advertisement is role-specific. `register_model_provider` automatically advertises the registry ID as `provider` plus semantic-action, structured-output, multimodal-input, and usage-reporting flags; pass model-specific overrides such as `model` or `context_window_tokens` when known. `register_host_provider` accepts typed capability shapes for embedding, Knowledge, and Memory providers and sends exactly what you provide. `on_approval` advertises approval support and optional cancellation support. After initialization, `host_service_registration(role, registry_id)` exposes the Harness registration result; future runtime roles may return `active: false` with a reason until their Engine dispatch milestone is live.
+
 ### Load an installed skill package
 
 ```python
