@@ -153,6 +153,39 @@ This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 3. optionally load a resolved skill package
 4. choose which tool packages to `load()`
 
+### Run Harness over the machine protocol
+
+```python
+from agentpm import HarnessClient
+
+harness = HarnessClient(agent="./agent.json")
+
+
+def model_provider(request):
+    return {
+        "id": "turn-1",
+        "assistant_content": "Handled by the host model.",
+        "actions": [],
+        "usage": {},
+        "finish_reason": "stop",
+        "provider_metadata": {"model": request["selection"]["model"]},
+    }
+
+
+harness.register_model_provider("company-model", model_provider)
+harness.on_before_tool_call(
+    lambda input: {"decision": "continue", "patch": {"arguments": input["arguments"]}}
+)
+harness.on_approval(lambda checkpoint: "approve")
+
+result = harness.run("Use the configured agent.")
+harness.shutdown()
+
+print(result)
+```
+
+Register host services before starting a run. The SDK launches `agentpm harness --machine`, correlates request/response frames, streams Harness events, and routes host-service callbacks for model providers, hooks, and approvals.
+
 ### Load an installed skill package
 
 ```python

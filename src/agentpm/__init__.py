@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 __all__ = [
+    "Harness",
+    "HarnessClient",
+    "HarnessProtocolError",
+    "HostServiceRequest",
     "__version__",
     "load",
     "load_agent",
@@ -30,6 +34,7 @@ from .core import (
     load_profile,
     load_skill,
 )
+from .harness import Harness, HarnessClient, HarnessProtocolError, HostServiceRequest
 
 try:
     __version__ = version("agentpm")
