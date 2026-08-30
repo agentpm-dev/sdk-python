@@ -7,7 +7,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, Required, TypedDict, cast, overload
 
 JsonValue = str | int | float | bool | None | dict[str, Any] | list[Any]
 HarnessHookId = Literal[
@@ -23,9 +23,192 @@ HarnessHookId = Literal[
 HarnessServiceRole = Literal["model", "embedding", "hook", "knowledge", "memory", "approval"]
 
 HostServiceHandler = Callable[["HostServiceRequest"], JsonValue]
-HookHandler = Callable[[JsonValue], dict[str, Any] | None]
 ApprovalHandler = Callable[[JsonValue], str | dict[str, Any]]
 ModelProviderHandler = Callable[[JsonValue], JsonValue]
+
+
+class HostServiceRegistration(TypedDict):
+    role: HarnessServiceRole
+    registry_id: str
+
+
+class HostServiceRegistrationResult(TypedDict, total=False):
+    registered: Required[bool]
+    service: Required[HostServiceRegistration]
+    active: Required[bool]
+    reason: str | None
+
+
+class ModelProviderCapabilities(TypedDict, total=False):
+    provider: str
+    model: str
+    models: list[str]
+    semantic_actions: Required[bool]
+    structured_output: Required[bool]
+    multimodal_input: Required[bool]
+    context_window_tokens: int
+    usage_reporting: Required[bool]
+
+
+class EmbeddingSpaceCapability(TypedDict, total=False):
+    provider: str
+    model: Required[str]
+    dimensions: Required[int]
+    normalized: Required[bool]
+
+
+class EmbeddingProviderCapabilities(TypedDict):
+    embedding_spaces: list[EmbeddingSpaceCapability]
+
+
+class KnowledgePackageRealization(TypedDict, total=False):
+    package: Required[str]
+    version: str
+    corpus: str
+    ready: Required[bool]
+
+
+class KnowledgeProviderCapabilities(TypedDict, total=False):
+    modes: list[str]
+    features: list[str]
+    packages: list[KnowledgePackageRealization]
+
+
+class MemoryPackageRealization(TypedDict, total=False):
+    package: Required[str]
+    version: str
+    ready: Required[bool]
+
+
+class MemoryProviderCapabilities(TypedDict, total=False):
+    descriptor: Required[JsonValue]
+    packages: list[MemoryPackageRealization]
+
+
+class ApprovalCapabilities(TypedDict, total=False):
+    approval: Literal[True]
+    cancellation: bool
+
+
+class HookCapabilities(TypedDict):
+    hooks: list[HarnessHookId]
+
+
+HostProviderCapabilities = (
+    ModelProviderCapabilities
+    | EmbeddingProviderCapabilities
+    | KnowledgeProviderCapabilities
+    | MemoryProviderCapabilities
+    | dict[str, Any]
+)
+
+
+class HookContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[dict[str, Any]]
+
+
+class HookRejectDecision(TypedDict):
+    decision: Literal["reject"]
+    reason: str
+
+
+HookDecision = HookContinueDecision | HookRejectDecision
+HookHandler = Callable[[JsonValue], HookDecision | None]
+
+
+class HookPhaseSnapshot(TypedDict):
+    phase_id: str
+    phase_objective: str
+    completion: JsonValue
+
+
+class BeforeModelRequestModel(TypedDict):
+    provider: str
+    model: str
+    options: NotRequired[JsonValue]
+
+
+class BeforeModelRequestSection(TypedDict):
+    number: int
+    title: str
+    content: str
+    mutable: bool
+
+
+class BeforeModelRequestInput(TypedDict):
+    run_id: str
+    phase_execution_id: str
+    phase: HookPhaseSnapshot
+    model: NotRequired[BeforeModelRequestModel]
+    sections: list[BeforeModelRequestSection]
+    repair_feedback: NotRequired[str]
+
+
+class BeforeModelRequestContextSection(TypedDict):
+    title: str
+    content: str
+
+
+class BeforeModelRequestPatch(TypedDict, total=False):
+    context_sections: list[BeforeModelRequestContextSection]
+    provider_options: dict[str, JsonValue]
+
+
+class BeforeModelRequestContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeModelRequestPatch]
+
+
+BeforeModelRequestDecision = BeforeModelRequestContinueDecision | HookRejectDecision
+BeforeModelRequestHookHandler = Callable[
+    [BeforeModelRequestInput], BeforeModelRequestDecision | None
+]
+
+
+class BeforeToolSelectionCandidate(TypedDict):
+    canonical_id: str
+    description: str
+    source: str
+
+
+class BeforeToolSelectionInput(TypedDict):
+    phase: HookPhaseSnapshot
+    candidates: list[BeforeToolSelectionCandidate]
+
+
+class BeforeToolSelectionPatch(TypedDict, total=False):
+    candidate_ids: list[str]
+
+
+class BeforeToolSelectionContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeToolSelectionPatch]
+
+
+BeforeToolSelectionDecision = BeforeToolSelectionContinueDecision | HookRejectDecision
+BeforeToolSelectionHookHandler = Callable[
+    [BeforeToolSelectionInput], BeforeToolSelectionDecision | None
+]
+
+
+class BeforeToolCallInput(TypedDict):
+    phase_id: str
+    tool: str
+    arguments: JsonValue
+
+
+class BeforeToolCallPatch(TypedDict, total=False):
+    arguments: JsonValue
+
+
+class BeforeToolCallContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeToolCallPatch]
+
+
+BeforeToolCallDecision = BeforeToolCallContinueDecision | HookRejectDecision
+BeforeToolCallHookHandler = Callable[[BeforeToolCallInput], BeforeToolCallDecision | None]
 
 PROTOCOL = "agentpm-harness-machine"
 VERSION = 1
@@ -55,6 +238,7 @@ class _RegisteredService:
     hooks: list[HarnessHookId] | None = None
     capabilities: JsonValue = None
     request_timeout_ms: int | None = None
+    registration: HostServiceRegistrationResult | None = None
 
 
 class HarnessClient:
@@ -71,6 +255,13 @@ class HarnessClient:
         env: dict[str, str] | None = None,
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
+        """Create a Harness machine client.
+
+        `agent` is passed to `agentpm harness` as the Agent selector. It may be
+        a local Agent manifest path, such as `./agent.json`, or an installed
+        Agent package ref, such as `@scope/name@1.2.3`. Leave it unset to use
+        Harness workspace discovery/default Agent selection.
+        """
         self.agentpm_path = agentpm_path or os.environ.get("AGENTPM") or "agentpm"
         self.args = args
         self.agent = agent
@@ -91,6 +282,7 @@ class HarnessClient:
         self._events_condition = threading.Condition()
         self._services: dict[tuple[str, str], _RegisteredService] = {}
         self._registered_service_keys: set[tuple[str, str]] = set()
+        self._registration_results: dict[tuple[str, str], HostServiceRegistrationResult] = {}
         self._next_hook_registration_id = 0
 
     def start(self) -> None:
@@ -210,15 +402,26 @@ class HarnessClient:
             request_timeout_ms=request_timeout_ms,
         )
         self._registered_service_keys.discard((role, registry_id))
+        self._registration_results.pop((role, registry_id), None)
         if self._initialized:
             self._flush_registrations()
         return self
+
+    def host_service_registration(
+        self,
+        role: HarnessServiceRole,
+        registry_id: str,
+    ) -> HostServiceRegistrationResult | None:
+        return self._registration_results.get((role, registry_id))
+
+    def host_service_registrations(self) -> list[HostServiceRegistrationResult]:
+        return list(self._registration_results.values())
 
     def register_model_provider(
         self,
         registry_id: str,
         handler: ModelProviderHandler,
-        capabilities: JsonValue | None = None,
+        capabilities: ModelProviderCapabilities | None = None,
     ) -> HarnessClient:
         def model_handler(request: HostServiceRequest) -> JsonValue:
             if request.method != "generate":
@@ -229,17 +432,62 @@ class HarnessClient:
             "model",
             registry_id,
             model_handler,
-            capabilities=capabilities or _default_model_capabilities(),
+            capabilities=_default_model_capabilities(registry_id, capabilities),
         )
+
+    @overload
+    def register_host_provider(
+        self,
+        role: Literal["model"],
+        registry_id: str,
+        handler: HostServiceHandler,
+        capabilities: ModelProviderCapabilities | None = None,
+    ) -> HarnessClient: ...
+
+    @overload
+    def register_host_provider(
+        self,
+        role: Literal["embedding"],
+        registry_id: str,
+        handler: HostServiceHandler,
+        capabilities: EmbeddingProviderCapabilities | None = None,
+    ) -> HarnessClient: ...
+
+    @overload
+    def register_host_provider(
+        self,
+        role: Literal["knowledge"],
+        registry_id: str,
+        handler: HostServiceHandler,
+        capabilities: KnowledgeProviderCapabilities | None = None,
+    ) -> HarnessClient: ...
+
+    @overload
+    def register_host_provider(
+        self,
+        role: Literal["memory"],
+        registry_id: str,
+        handler: HostServiceHandler,
+        capabilities: MemoryProviderCapabilities | None = None,
+    ) -> HarnessClient: ...
 
     def register_host_provider(
         self,
         role: Literal["model", "embedding", "knowledge", "memory"],
         registry_id: str,
         handler: HostServiceHandler,
-        capabilities: JsonValue = None,
+        capabilities: HostProviderCapabilities | None = None,
     ) -> HarnessClient:
-        return self.register_host_service(role, registry_id, handler, capabilities=capabilities)
+        return self.register_host_service(
+            role,
+            registry_id,
+            handler,
+            capabilities=_normalize_host_provider_capabilities(
+                role,
+                registry_id,
+                capabilities,
+            ),
+        )
 
     def register_hook(
         self,
@@ -255,14 +503,14 @@ class HarnessClient:
             if request.method != hook:
                 raise RuntimeError(f"Unsupported Hook method {request.method}")
             decision = handler(_extract_hook_input(request.payload))
-            return decision or {"decision": "continue"}
+            return cast(JsonValue, decision or {"decision": "continue"})
 
         return self.register_host_service(
             "hook",
             service_registry_id,
             hook_handler,
             hooks=[hook],
-            capabilities={"hooks": [hook]},
+            capabilities=cast(JsonValue, cast(HookCapabilities, {"hooks": [hook]})),
             request_timeout_ms=request_timeout_ms,
         )
 
@@ -277,47 +525,51 @@ class HarnessClient:
 
     def on_before_model_request(
         self,
-        handler: HookHandler,
+        handler: BeforeModelRequestHookHandler,
         *,
         registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
         request_timeout_ms: int | None = None,
     ) -> HarnessClient:
         return self.register_hook(
             "before_model_request",
-            handler,
+            cast(HookHandler, handler),
             registry_id=registry_id,
             request_timeout_ms=request_timeout_ms,
         )
 
     def on_before_tool_selection(
         self,
-        handler: HookHandler,
+        handler: BeforeToolSelectionHookHandler,
         *,
         registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
         request_timeout_ms: int | None = None,
     ) -> HarnessClient:
         return self.register_hook(
             "before_tool_selection",
-            handler,
+            cast(HookHandler, handler),
             registry_id=registry_id,
             request_timeout_ms=request_timeout_ms,
         )
 
     def on_before_tool_call(
         self,
-        handler: HookHandler,
+        handler: BeforeToolCallHookHandler,
         *,
         registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
         request_timeout_ms: int | None = None,
     ) -> HarnessClient:
         return self.register_hook(
             "before_tool_call",
-            handler,
+            cast(HookHandler, handler),
             registry_id=registry_id,
             request_timeout_ms=request_timeout_ms,
         )
 
-    def on_approval(self, handler: ApprovalHandler) -> HarnessClient:
+    def on_approval(
+        self,
+        handler: ApprovalHandler,
+        capabilities: ApprovalCapabilities | None = None,
+    ) -> HarnessClient:
         def approval_handler(request: HostServiceRequest) -> JsonValue:
             if request.method != "request_approval":
                 raise RuntimeError(f"Unsupported approval method {request.method}")
@@ -326,7 +578,12 @@ class HarnessClient:
                 return {"decision": decision}
             return decision
 
-        return self.register_host_service("approval", "controller", approval_handler)
+        return self.register_host_service(
+            "approval",
+            "controller",
+            approval_handler,
+            capabilities=_default_approval_capabilities(capabilities),
+        )
 
     def _default_args(self) -> list[str]:
         if self.args is not None:
@@ -351,7 +608,7 @@ class HarnessClient:
         for key, service in list(self._services.items()):
             if key in self._registered_service_keys:
                 continue
-            self._request(
+            response = self._request(
                 "register_host_service",
                 {
                     "role": service.role,
@@ -361,6 +618,9 @@ class HarnessClient:
                     "request_timeout_ms": service.request_timeout_ms or 120_000,
                 },
             )
+            registration = _normalize_host_service_registration_result(response, service)
+            service.registration = registration
+            self._registration_results[key] = registration
             self._registered_service_keys.add(key)
 
     def _request(self, method: str, payload: JsonValue) -> JsonValue:
@@ -538,13 +798,45 @@ class HarnessClient:
 Harness = HarnessClient
 
 
-def _default_model_capabilities() -> dict[str, bool]:
-    return {
+def _default_model_capabilities(
+    registry_id: str,
+    overrides: ModelProviderCapabilities | None = None,
+) -> JsonValue:
+    capabilities: dict[str, Any] = {
+        "provider": registry_id,
         "semantic_actions": True,
         "structured_output": True,
         "multimodal_input": False,
         "usage_reporting": True,
     }
+    if overrides:
+        capabilities.update(overrides)
+    return capabilities
+
+
+def _normalize_host_provider_capabilities(
+    role: Literal["model", "embedding", "knowledge", "memory"],
+    registry_id: str,
+    capabilities: HostProviderCapabilities | None,
+) -> JsonValue:
+    if role == "model":
+        return _default_model_capabilities(
+            registry_id,
+            cast(ModelProviderCapabilities | None, capabilities),
+        )
+    return cast(JsonValue, capabilities or {})
+
+
+def _default_approval_capabilities(
+    overrides: ApprovalCapabilities | None = None,
+) -> JsonValue:
+    capabilities: dict[str, Any] = {
+        "approval": True,
+        "cancellation": False,
+    }
+    if overrides:
+        capabilities.update(overrides)
+    return capabilities
 
 
 def _extract_hook_input(payload: JsonValue) -> JsonValue:
@@ -573,9 +865,48 @@ def _run_service_handler(service: _RegisteredService, request: HostServiceReques
     return response
 
 
+def _normalize_host_service_registration_result(
+    value: JsonValue,
+    service: _RegisteredService,
+) -> HostServiceRegistrationResult:
+    fallback: HostServiceRegistrationResult = {
+        "registered": True,
+        "service": {
+            "role": service.role,
+            "registry_id": service.registry_id,
+        },
+        "active": True,
+    }
+    if not isinstance(value, dict):
+        return fallback
+    service_value = value.get("service")
+    if isinstance(service_value, dict):
+        role = service_value.get("role", service.role)
+        registry_id = service_value.get("registry_id", service.registry_id)
+    else:
+        role = service.role
+        registry_id = service.registry_id
+    registered_value = value.get("registered")
+    active_value = value.get("active")
+    result: HostServiceRegistrationResult = {
+        "registered": registered_value if isinstance(registered_value, bool) else True,
+        "service": {
+            "role": cast(HarnessServiceRole, role) if isinstance(role, str) else service.role,
+            "registry_id": registry_id if isinstance(registry_id, str) else service.registry_id,
+        },
+        "active": active_value if isinstance(active_value, bool) else True,
+    }
+    reason = value.get("reason")
+    if isinstance(reason, str) or reason is None:
+        result["reason"] = reason
+    return result
+
+
 __all__ = [
     "Harness",
     "HarnessClient",
     "HarnessProtocolError",
+    "HostServiceRegistration",
+    "HostServiceRegistrationResult",
     "HostServiceRequest",
 ]

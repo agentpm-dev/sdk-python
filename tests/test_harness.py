@@ -10,12 +10,26 @@ from typing import Any
 
 import pytest
 
-from agentpm import HarnessClient, HarnessProtocolError
+from agentpm import (
+    BeforeModelRequestDecision,
+    BeforeToolCallDecision,
+    BeforeToolSelectionDecision,
+    HarnessClient,
+    HarnessProtocolError,
+    HookDecision,
+)
 
 
 def _write_fake_harness(tmp_path: Path, body: str) -> str:
     script = tmp_path / "fake_harness.py"
     script.write_text(body, encoding="utf-8")
+    return str(script)
+
+
+def _write_fake_agentpm_command(tmp_path: Path, body: str) -> str:
+    script = tmp_path / "agentpm"
+    script.write_text(f"#!/usr/bin/env python3\n{body}", encoding="utf-8")
+    script.chmod(0o755)
     return str(script)
 
 
@@ -63,6 +77,38 @@ def test_harness_client_initializes_streams_events_runs_and_shuts_down(tmp_path:
         "payload"
     ] == {"fields": {"input": "hello"}}
     assert client.shutdown() == {"shutdown": True}
+
+
+def test_harness_client_passes_installed_agent_refs_as_positional_selector(
+    tmp_path: Path,
+) -> None:
+    command = _write_fake_agentpm_command(
+        tmp_path,
+        (
+            "import json\n"
+            "import sys\n\n"
+            'PROTOCOL = "agentpm-harness-machine"\n\n'
+            "def write(frame):\n"
+            '    frame = {"protocol": PROTOCOL, "version": 1, **frame}\n'
+            '    sys.stdout.write(json.dumps(frame) + "\\n")\n'
+            "    sys.stdout.flush()\n\n"
+            "for line in sys.stdin:\n"
+            "    frame = json.loads(line)\n"
+            '    if frame.get("method") == "initialize":\n'
+            '        write({"kind": "response", "id": frame["id"], "payload": {"argv": sys.argv[1:], "session": {"protocol": PROTOCOL, "version": 1}}})\n'
+        ),
+    )
+    client = HarnessClient(
+        agentpm_path=command,
+        agent="@zack/support-agent@0.1.0",
+    )
+
+    assert client.initialize()["argv"] == [
+        "harness",
+        "@zack/support-agent@0.1.0",
+        "--machine",
+    ]
+    client.stop()
 
 
 def test_harness_client_iterates_buffered_and_future_events_once(
@@ -134,7 +180,7 @@ def test_harness_client_routes_model_hook_and_approval_callbacks(tmp_path: Path)
             "provider_metadata": {},
         }
 
-    def tool_hook(payload: Any) -> dict[str, Any]:
+    def tool_hook(payload: Any) -> BeforeToolCallDecision:
         calls.append(f"hook:{payload}")
         return {"decision": "continue", "patch": {"arguments": {"body": "patched"}}}
 
@@ -175,7 +221,7 @@ def test_harness_client_maps_callback_timeouts_to_error_frames(tmp_path: Path) -
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
-    def slow_hook(_: Any) -> dict[str, Any]:
+    def slow_hook(_: Any) -> HookDecision:
         time.sleep(0.05)
         return {"decision": "continue"}
 
@@ -215,13 +261,14 @@ def test_harness_client_registers_repeated_hooks_as_ordered_bindings(
     seen: list[Any] = []
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
-    def second_hook(payload: Any) -> dict[str, Any]:
+    def first_hook(_: Any) -> BeforeToolSelectionDecision:
+        return {"decision": "continue", "patch": {"candidate_ids": ["t1"]}}
+
+    def second_hook(payload: Any) -> BeforeToolSelectionDecision:
         seen.append(payload)
         return {"decision": "continue", "patch": {"candidate_ids": ["t1"]}}
 
-    client.on_before_tool_selection(
-        lambda _: {"decision": "continue", "patch": {"candidate_ids": ["t1"]}}
-    ).on_before_tool_selection(second_hook)
+    client.on_before_tool_selection(first_hook).on_before_tool_selection(second_hook)
 
     result = client.run("compose hooks")
     assert result["output"] == {
@@ -229,6 +276,114 @@ def test_harness_client_registers_repeated_hooks_as_ordered_bindings(
         "second": ["t1"],
     }
     assert seen == [{"candidates": [{"canonical_id": "t1"}]}]
+    client.stop()
+
+
+def test_harness_client_advertises_role_specific_host_service_capabilities(
+    tmp_path: Path,
+) -> None:
+    script = _write_fake_harness(
+        tmp_path,
+        _common_harness(
+            """
+            registrations = []
+            for line in sys.stdin:
+                frame = json.loads(line)
+                if frame.get("method") == "initialize":
+                    write({"kind": "response", "id": frame["id"], "payload": {"session": {"protocol": PROTOCOL, "version": 1}, "preflight": {"status": "ready"}, "required_host_services": []}})
+                elif frame.get("method") == "register_host_service":
+                    registrations.append({
+                        "role": frame["payload"]["role"],
+                        "registry_id": frame["payload"]["registry_id"],
+                        "capabilities": frame["payload"]["capabilities"],
+                        "hooks": frame["payload"]["hooks"],
+                    })
+                    write({"kind": "response", "id": frame["id"], "payload": {"registered": True}})
+                elif frame.get("method") == "start_run":
+                    write({"kind": "response", "id": frame["id"], "payload": {"status": "ended", "output": {"registrations": registrations}, "report": {}}})
+            """
+        ),
+    )
+    client = HarnessClient(agentpm_path=sys.executable, args=[script])
+    client.register_model_provider(
+        "company-model",
+        lambda _: {},
+        {
+            "model": "model-1",
+            "context_window_tokens": 4096,
+            "semantic_actions": True,
+            "structured_output": True,
+            "multimodal_input": False,
+            "usage_reporting": True,
+        },
+    ).register_host_provider(
+        "embedding",
+        "embedder",
+        lambda _: {},
+        {
+            "embedding_spaces": [
+                {
+                    "provider": "embedder",
+                    "model": "embed-1",
+                    "dimensions": 1536,
+                    "normalized": True,
+                }
+            ]
+        },
+    ).on_before_tool_call(
+        lambda _: {"decision": "continue"},
+        registry_id="hook-a",
+    ).on_approval(
+        lambda _: "approve",
+        {"approval": True, "cancellation": True},
+    )
+
+    result = client.run("advertise capabilities")
+    assert result["output"] == {
+        "registrations": [
+            {
+                "role": "model",
+                "registry_id": "company-model",
+                "capabilities": {
+                    "provider": "company-model",
+                    "model": "model-1",
+                    "semantic_actions": True,
+                    "structured_output": True,
+                    "multimodal_input": False,
+                    "context_window_tokens": 4096,
+                    "usage_reporting": True,
+                },
+                "hooks": [],
+            },
+            {
+                "role": "embedding",
+                "registry_id": "embedder",
+                "capabilities": {
+                    "embedding_spaces": [
+                        {
+                            "provider": "embedder",
+                            "model": "embed-1",
+                            "dimensions": 1536,
+                            "normalized": True,
+                        }
+                    ]
+                },
+                "hooks": [],
+            },
+            {
+                "role": "hook",
+                "registry_id": "hook-a",
+                "capabilities": {"hooks": ["before_tool_call"]},
+                "hooks": ["before_tool_call"],
+            },
+            {
+                "role": "approval",
+                "registry_id": "controller",
+                "capabilities": {"approval": True, "cancellation": True},
+                "hooks": [],
+            },
+        ]
+    }
     client.stop()
 
 
@@ -254,10 +409,49 @@ def test_harness_client_flushes_registrations_added_after_initialize(
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
+    def late_hook(_: Any) -> BeforeToolCallDecision:
+        return {"decision": "continue"}
+
     client.initialize()
-    client.on_before_tool_call(lambda _: {"decision": "continue"})
+    client.on_before_tool_call(late_hook)
 
     assert client.run("late hook")["output"] == {"registrations": ["sdk-hooks"]}
+    client.stop()
+
+
+def test_harness_client_stores_inactive_future_role_registration(
+    tmp_path: Path,
+) -> None:
+    script = _write_fake_harness(
+        tmp_path,
+        _common_harness(
+            """
+            for line in sys.stdin:
+                frame = json.loads(line)
+                if frame.get("method") == "initialize":
+                    write({"kind": "response", "id": frame["id"], "payload": {"session": {"protocol": PROTOCOL, "version": 1}, "preflight": {"status": "ready"}, "required_host_services": []}})
+                elif frame.get("method") == "register_host_service":
+                    write({"kind": "response", "id": frame["id"], "payload": {
+                        "registered": True,
+                        "service": {"role": frame["payload"]["role"], "registry_id": frame["payload"]["registry_id"]},
+                        "active": False,
+                        "reason": "KnowledgeRuntime host dispatch is reserved until Milestone 12",
+                    }})
+            """
+        ),
+    )
+    client = HarnessClient(agentpm_path=sys.executable, args=[script])
+
+    client.register_host_provider("knowledge", "kb", lambda _: {"ok": True})
+    client.initialize()
+
+    assert client.host_service_registration("knowledge", "kb") == {
+        "registered": True,
+        "service": {"role": "knowledge", "registry_id": "kb"},
+        "active": False,
+        "reason": "KnowledgeRuntime host dispatch is reserved until Milestone 12",
+    }
+    assert len(client.host_service_registrations()) == 1
     client.stop()
 
 
@@ -357,11 +551,11 @@ def test_real_agentpm_harness_process_when_fixture_env_is_set() -> None:
             "provider_metadata": {},
         }
 
-    def before_model_request(_: Any) -> dict[str, str]:
+    def before_model_request(_: Any) -> BeforeModelRequestDecision:
         calls.append("before_model_request")
         return {"decision": "continue"}
 
-    def before_tool_call(_: Any) -> dict[str, str]:
+    def before_tool_call(_: Any) -> BeforeToolCallDecision:
         calls.append("before_tool_call")
         return {"decision": "continue"}
 
