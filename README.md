@@ -156,7 +156,7 @@ This is the Python mirror of the Node SDK’s `loadAgent()` flow:
 ### Run Harness over the machine protocol
 
 ```python
-from agentpm import HarnessClient
+from agentpm import BeforeToolCallDecision, BeforeToolCallInput, HarnessClient
 
 harness = HarnessClient(agent="@zack/support-agent@0.1.0")
 
@@ -172,10 +172,12 @@ def model_provider(request):
     }
 
 
+def before_tool_call(input: BeforeToolCallInput) -> BeforeToolCallDecision:
+    return {"decision": "continue", "patch": {"arguments": input["arguments"]}}
+
+
 harness.register_model_provider("company-model", model_provider)
-harness.on_before_tool_call(
-    lambda input: {"decision": "continue", "patch": {"arguments": input["arguments"]}}
-)
+harness.on_before_tool_call(before_tool_call)
 harness.on_approval(lambda checkpoint: "approve")
 
 result = harness.run("Use the configured agent.")
