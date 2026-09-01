@@ -27,6 +27,80 @@ ApprovalHandler = Callable[[JsonValue], str | dict[str, Any]]
 ModelProviderHandler = Callable[[JsonValue], JsonValue]
 
 
+class EmbeddingProviderRequest(TypedDict):
+    provider: str
+    model: str
+    dimensions: int
+    normalized: bool
+    text: str
+
+
+class EmbeddingProviderVectorResult(TypedDict, total=False):
+    vector: list[float]
+    values: list[float]
+    provider: str
+    model: str
+    dimensions: int
+    normalized: bool
+
+
+EmbeddingProviderResult = list[float] | EmbeddingProviderVectorResult
+EmbeddingProviderHandler = Callable[[EmbeddingProviderRequest], EmbeddingProviderResult]
+KnowledgeRequestMode = Literal["context_document", "vector_query"]
+
+
+class KnowledgeRuntimeRequest(TypedDict, total=False):
+    package: Required[str]
+    version: Required[str]
+    mode: Required[KnowledgeRequestMode]
+    document: str
+    query: str
+    top_k: int
+    score_threshold: float
+    return_citations: bool
+
+
+class KnowledgeRuntimeFailure(TypedDict, total=False):
+    code: Required[str]
+    message: Required[str]
+    retryable: bool
+
+
+class KnowledgeRetrievalResult(TypedDict, total=False):
+    rank: Required[int]
+    score: Required[float]
+    chunk_id: Required[str]
+    source_id: Required[str]
+    source_title: str
+    source_uri: str
+    text: str
+    chunk_metadata: JsonValue
+    source_metadata: JsonValue
+
+
+class KnowledgeCitation(TypedDict, total=False):
+    chunk_id: Required[str]
+    source_id: Required[str]
+    title: str
+    uri: str
+
+
+class KnowledgeRuntimeResult(TypedDict, total=False):
+    ok: Required[bool]
+    package: Required[str]
+    version: Required[str]
+    mode: Required[KnowledgeRequestMode]
+    document: str
+    query: str
+    content: str
+    results: list[KnowledgeRetrievalResult]
+    citations: list[KnowledgeCitation]
+    error: KnowledgeRuntimeFailure
+
+
+KnowledgeRuntimeHandler = Callable[[KnowledgeRuntimeRequest], KnowledgeRuntimeResult]
+
+
 class HostServiceRegistration(TypedDict):
     role: HarnessServiceRole
     registry_id: str
@@ -50,11 +124,11 @@ class ModelProviderCapabilities(TypedDict, total=False):
     usage_reporting: Required[bool]
 
 
-class EmbeddingSpaceCapability(TypedDict, total=False):
+class EmbeddingSpaceCapability(TypedDict):
     provider: str
-    model: Required[str]
-    dimensions: Required[int]
-    normalized: Required[bool]
+    model: str
+    dimensions: int
+    normalized: bool
 
 
 class EmbeddingProviderCapabilities(TypedDict):
@@ -63,14 +137,14 @@ class EmbeddingProviderCapabilities(TypedDict):
 
 class KnowledgePackageRealization(TypedDict, total=False):
     package: Required[str]
-    version: str
+    version: Required[str]
     corpus: str
     ready: Required[bool]
 
 
 class KnowledgeProviderCapabilities(TypedDict, total=False):
-    modes: list[str]
-    features: list[str]
+    modes: Required[list[str]]
+    features: Required[list[str]]
     packages: list[KnowledgePackageRealization]
 
 
@@ -209,6 +283,129 @@ class BeforeToolCallContinueDecision(TypedDict):
 
 BeforeToolCallDecision = BeforeToolCallContinueDecision | HookRejectDecision
 BeforeToolCallHookHandler = Callable[[BeforeToolCallInput], BeforeToolCallDecision | None]
+
+
+class BeforeKnowledgeRequestInput(TypedDict):
+    phase_id: str
+    request: KnowledgeRuntimeRequest
+
+
+class BeforeKnowledgeRequestPatch(TypedDict, total=False):
+    document: str
+    query: str
+    top_k: int
+    score_threshold: float
+    return_citations: bool
+
+
+class BeforeKnowledgeRequestContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeKnowledgeRequestPatch]
+
+
+BeforeKnowledgeRequestDecision = BeforeKnowledgeRequestContinueDecision | HookRejectDecision
+BeforeKnowledgeRequestHookHandler = Callable[
+    [BeforeKnowledgeRequestInput], BeforeKnowledgeRequestDecision | None
+]
+
+
+class AfterKnowledgeRetrievalInput(TypedDict):
+    phase_id: str
+    result: KnowledgeRuntimeResult
+
+
+class AfterKnowledgeRetrievalResultPatch(TypedDict, total=False):
+    chunk_id: Required[str]
+    source_id: Required[str]
+    text: str
+
+
+class AfterKnowledgeRetrievalPatch(TypedDict, total=False):
+    content: str
+    results: list[AfterKnowledgeRetrievalResultPatch]
+
+
+class AfterKnowledgeRetrievalContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[AfterKnowledgeRetrievalPatch]
+
+
+AfterKnowledgeRetrievalDecision = AfterKnowledgeRetrievalContinueDecision | HookRejectDecision
+AfterKnowledgeRetrievalHookHandler = Callable[
+    [AfterKnowledgeRetrievalInput], AfterKnowledgeRetrievalDecision | None
+]
+
+
+class BeforeMemoryReadInput(TypedDict, total=False):
+    phase_id: Required[str]
+    package: Required[str]
+    space: Required[str]
+    scope: Required[JsonValue]
+    query: str
+    filter: JsonValue
+    limit: int
+    mode: str
+
+
+class BeforeMemoryReadPatch(TypedDict, total=False):
+    query: str
+    filter: JsonValue
+    limit: int
+    mode: str
+
+
+class BeforeMemoryReadContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeMemoryReadPatch]
+
+
+BeforeMemoryReadDecision = BeforeMemoryReadContinueDecision | HookRejectDecision
+BeforeMemoryReadHookHandler = Callable[[BeforeMemoryReadInput], BeforeMemoryReadDecision | None]
+
+
+class BeforeMemoryWriteInput(TypedDict):
+    phase_id: str
+    package: str
+    space: str
+    record_type: str
+    scope: JsonValue
+    content: JsonValue
+
+
+class BeforeMemoryWritePatch(TypedDict, total=False):
+    content: JsonValue
+
+
+class BeforeMemoryWriteContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeMemoryWritePatch]
+
+
+BeforeMemoryWriteDecision = BeforeMemoryWriteContinueDecision | HookRejectDecision
+BeforeMemoryWriteHookHandler = Callable[[BeforeMemoryWriteInput], BeforeMemoryWriteDecision | None]
+
+
+class BeforeMemoryOperationInput(TypedDict):
+    phase_id: str
+    package: str
+    operation: str
+    scope: JsonValue
+    source_summary: JsonValue
+
+
+class BeforeMemoryOperationPatch(TypedDict, total=False):
+    model_guidance: str
+
+
+class BeforeMemoryOperationContinueDecision(TypedDict):
+    decision: Literal["continue"]
+    patch: NotRequired[BeforeMemoryOperationPatch]
+
+
+BeforeMemoryOperationDecision = BeforeMemoryOperationContinueDecision | HookRejectDecision
+BeforeMemoryOperationHookHandler = Callable[
+    [BeforeMemoryOperationInput], BeforeMemoryOperationDecision | None
+]
 
 PROTOCOL = "agentpm-harness-machine"
 VERSION = 1
@@ -435,6 +632,42 @@ class HarnessClient:
             capabilities=_default_model_capabilities(registry_id, capabilities),
         )
 
+    def register_embedding_provider(
+        self,
+        registry_id: str,
+        handler: EmbeddingProviderHandler,
+        capabilities: EmbeddingProviderCapabilities,
+    ) -> HarnessClient:
+        def embedding_handler(request: HostServiceRequest) -> JsonValue:
+            if request.method != "embed":
+                raise RuntimeError(f"Unsupported embedding method {request.method}")
+            return cast(JsonValue, handler(cast(EmbeddingProviderRequest, request.payload)))
+
+        return self.register_host_service(
+            "embedding",
+            registry_id,
+            embedding_handler,
+            capabilities=cast(JsonValue, capabilities),
+        )
+
+    def register_knowledge_runtime(
+        self,
+        registry_id: str,
+        handler: KnowledgeRuntimeHandler,
+        capabilities: KnowledgeProviderCapabilities,
+    ) -> HarnessClient:
+        def knowledge_handler(request: HostServiceRequest) -> JsonValue:
+            if request.method != "retrieve":
+                raise RuntimeError(f"Unsupported KnowledgeRuntime method {request.method}")
+            return cast(JsonValue, handler(_extract_knowledge_runtime_request(request.payload)))
+
+        return self.register_host_service(
+            "knowledge",
+            registry_id,
+            knowledge_handler,
+            capabilities=cast(JsonValue, capabilities),
+        )
+
     @overload
     def register_host_provider(
         self,
@@ -560,6 +793,76 @@ class HarnessClient:
     ) -> HarnessClient:
         return self.register_hook(
             "before_tool_call",
+            cast(HookHandler, handler),
+            registry_id=registry_id,
+            request_timeout_ms=request_timeout_ms,
+        )
+
+    def on_before_knowledge_request(
+        self,
+        handler: BeforeKnowledgeRequestHookHandler,
+        *,
+        registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
+        request_timeout_ms: int | None = None,
+    ) -> HarnessClient:
+        return self.register_hook(
+            "before_knowledge_request",
+            cast(HookHandler, handler),
+            registry_id=registry_id,
+            request_timeout_ms=request_timeout_ms,
+        )
+
+    def on_after_knowledge_retrieval(
+        self,
+        handler: AfterKnowledgeRetrievalHookHandler,
+        *,
+        registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
+        request_timeout_ms: int | None = None,
+    ) -> HarnessClient:
+        return self.register_hook(
+            "after_knowledge_retrieval",
+            cast(HookHandler, handler),
+            registry_id=registry_id,
+            request_timeout_ms=request_timeout_ms,
+        )
+
+    def on_before_memory_read(
+        self,
+        handler: BeforeMemoryReadHookHandler,
+        *,
+        registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
+        request_timeout_ms: int | None = None,
+    ) -> HarnessClient:
+        return self.register_hook(
+            "before_memory_read",
+            cast(HookHandler, handler),
+            registry_id=registry_id,
+            request_timeout_ms=request_timeout_ms,
+        )
+
+    def on_before_memory_write(
+        self,
+        handler: BeforeMemoryWriteHookHandler,
+        *,
+        registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
+        request_timeout_ms: int | None = None,
+    ) -> HarnessClient:
+        return self.register_hook(
+            "before_memory_write",
+            cast(HookHandler, handler),
+            registry_id=registry_id,
+            request_timeout_ms=request_timeout_ms,
+        )
+
+    def on_before_memory_operation(
+        self,
+        handler: BeforeMemoryOperationHookHandler,
+        *,
+        registry_id: str = DEFAULT_HOOK_REGISTRY_ID,
+        request_timeout_ms: int | None = None,
+    ) -> HarnessClient:
+        return self.register_hook(
+            "before_memory_operation",
             cast(HookHandler, handler),
             registry_id=registry_id,
             request_timeout_ms=request_timeout_ms,
@@ -843,6 +1146,12 @@ def _extract_hook_input(payload: JsonValue) -> JsonValue:
     if isinstance(payload, dict) and "input" in payload:
         return payload["input"]
     return payload
+
+
+def _extract_knowledge_runtime_request(payload: JsonValue) -> KnowledgeRuntimeRequest:
+    if isinstance(payload, dict) and "request" in payload:
+        return cast(KnowledgeRuntimeRequest, payload["request"])
+    return cast(KnowledgeRuntimeRequest, payload)
 
 
 def _run_service_handler(service: _RegisteredService, request: HostServiceRequest) -> JsonValue:
