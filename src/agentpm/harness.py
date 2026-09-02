@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import subprocess
@@ -623,7 +624,7 @@ class HarnessClient:
         def model_handler(request: HostServiceRequest) -> JsonValue:
             if request.method != "generate":
                 raise RuntimeError(f"Unsupported model method {request.method}")
-            return handler(request.payload)
+            return _normalize_model_provider_result(handler(request.payload))
 
         return self.register_host_service(
             "model",
@@ -1117,6 +1118,65 @@ def _default_model_capabilities(
     return capabilities
 
 
+def _normalize_model_provider_result(value: JsonValue) -> JsonValue:
+    if not isinstance(value, dict):
+        return value
+    return {
+        **value,
+        "usage": _normalize_run_usage(value.get("usage")),
+    }
+
+
+def _normalize_run_usage(value: JsonValue) -> JsonValue:
+    usage = value if isinstance(value, dict) else {}
+    return {
+        "model_calls": _usage_int(usage.get("model_calls")),
+        "tokens": _normalize_token_usage(usage.get("tokens")),
+        "accepted_semantic_actions": _usage_int(usage.get("accepted_semantic_actions")),
+        "tool_calls": _usage_int(usage.get("tool_calls")),
+        "tool_retries": _usage_int(usage.get("tool_retries")),
+        "knowledge_requests": _usage_int(usage.get("knowledge_requests")),
+        "memory_requests": _usage_int(usage.get("memory_requests")),
+        "embedding_requests": _usage_int(usage.get("embedding_requests")),
+        "duration_ms": _optional_usage_int(usage.get("duration_ms")),
+        "cost": _normalize_cost_usage(usage.get("cost")),
+    }
+
+
+def _normalize_token_usage(value: JsonValue) -> JsonValue:
+    tokens = value if isinstance(value, dict) else {}
+    return {
+        "input_tokens": _optional_usage_int(tokens.get("input_tokens")),
+        "output_tokens": _optional_usage_int(tokens.get("output_tokens")),
+        "total_tokens": _optional_usage_int(tokens.get("total_tokens")),
+    }
+
+
+def _normalize_cost_usage(value: JsonValue) -> JsonValue:
+    cost = value if isinstance(value, dict) else {}
+    currency = cost.get("currency")
+    return {
+        "amount": _optional_usage_number(cost.get("amount")),
+        "currency": currency if isinstance(currency, str) else None,
+    }
+
+
+def _usage_int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _optional_usage_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _optional_usage_number(value: Any) -> int | float | None:
+    return (
+        value
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        else None
+    )
+
+
 def _normalize_host_provider_capabilities(
     role: Literal["model", "embedding", "knowledge", "memory"],
     registry_id: str,
@@ -1200,8 +1260,8 @@ def _normalize_host_service_registration_result(
     result: HostServiceRegistrationResult = {
         "registered": registered_value if isinstance(registered_value, bool) else True,
         "service": {
-            "role": cast(HarnessServiceRole, role) if isinstance(role, str) else service.role,
-            "registry_id": registry_id if isinstance(registry_id, str) else service.registry_id,
+            "role": (cast(HarnessServiceRole, role) if isinstance(role, str) else service.role),
+            "registry_id": (registry_id if isinstance(registry_id, str) else service.registry_id),
         },
         "active": active_value if isinstance(active_value, bool) else True,
     }

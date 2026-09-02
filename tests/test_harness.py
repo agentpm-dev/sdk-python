@@ -58,7 +58,9 @@ def _common_harness(body: str) -> str:
     return prefix + body + "\n"
 
 
-def test_harness_client_initializes_streams_events_runs_and_shuts_down(tmp_path: Path) -> None:
+def test_harness_client_initializes_streams_events_runs_and_shuts_down(
+    tmp_path: Path,
+) -> None:
     script = _write_fake_harness(
         tmp_path,
         _common_harness("""
@@ -78,7 +80,10 @@ def test_harness_client_initializes_streams_events_runs_and_shuts_down(tmp_path:
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     assert client.wait_for_event(lambda event: event.get("status") == "ready")["status"] == "ready"
-    assert client.initialize()["session"] == {"protocol": "agentpm-harness-machine", "version": 1}
+    assert client.initialize()["session"] == {
+        "protocol": "agentpm-harness-machine",
+        "version": 1,
+    }
     assert client.preflight()["status"] == "ready_with_warnings"
     assert client.run("hello")["output"] == {"message": "done"}
     assert client.wait_for_event(lambda event: event.get("event_type") == "run_started")[
@@ -151,11 +156,14 @@ def test_harness_client_iterates_buffered_and_future_events_once(
         next(events)
 
 
-def test_harness_client_routes_model_hook_and_approval_callbacks(tmp_path: Path) -> None:
+def test_harness_client_routes_model_hook_and_approval_callbacks(
+    tmp_path: Path,
+) -> None:
     script = _write_fake_harness(
         tmp_path,
         _common_harness("""
             start_run_id = None
+            model_usage = None
             for line in sys.stdin:
                 frame = json.loads(line)
                 if frame.get("method") == "initialize":
@@ -166,11 +174,12 @@ def test_harness_client_routes_model_hook_and_approval_callbacks(tmp_path: Path)
                     start_run_id = frame["id"]
                     write({"kind": "request", "id": "host-model-1", "method": "host_service", "payload": {"role": "model", "registry_id": "company-model", "method": "generate", "payload": {"request": {"phase_id": "classify"}}}})
                 elif frame.get("kind") == "response" and frame.get("id") == "host-model-1":
+                    model_usage = frame["payload"]["usage"]
                     write({"kind": "request", "id": "host-hook-1", "method": "host_service", "payload": {"role": "hook", "registry_id": "sdk-hooks", "method": "before_tool_call", "payload": {"hook": "before_tool_call", "input": {"arguments": {"body": "original"}}}}})
                 elif frame.get("kind") == "response" and frame.get("id") == "host-hook-1":
                     write({"kind": "request", "id": "host-approval-1", "method": "host_service", "payload": {"role": "approval", "registry_id": "controller", "method": "request_approval", "payload": {"checkpoint": {"id": "gate"}}}})
                 elif frame.get("kind") == "response" and frame.get("id") == "host-approval-1":
-                    write({"kind": "response", "id": start_run_id, "payload": {"status": "ended", "output": {"approval": frame["payload"]["decision"]}, "report": {}}})
+                    write({"kind": "response", "id": start_run_id, "payload": {"status": "ended", "output": {"approval": frame["payload"]["decision"], "model_usage": model_usage}, "report": {}}})
             """),
     )
     calls: list[str] = []
@@ -200,7 +209,28 @@ def test_harness_client_routes_model_hook_and_approval_callbacks(tmp_path: Path)
 
     result = client.run("use host services")
     assert result["status"] == "ended"
-    assert result["output"] == {"approval": "approve"}
+    assert result["output"] == {
+        "approval": "approve",
+        "model_usage": {
+            "model_calls": 0,
+            "tokens": {
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+            },
+            "accepted_semantic_actions": 0,
+            "tool_calls": 0,
+            "tool_retries": 0,
+            "knowledge_requests": 0,
+            "memory_requests": 0,
+            "embedding_requests": 0,
+            "duration_ms": None,
+            "cost": {
+                "amount": None,
+                "currency": None,
+            },
+        },
+    }
     assert len(calls) == 3
     client.stop()
 
@@ -555,7 +585,9 @@ def test_harness_client_registers_typed_embedding_and_knowledge_providers(
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     calls: list[str] = []
 
-    def embedding_provider(request: EmbeddingProviderRequest) -> EmbeddingProviderResult:
+    def embedding_provider(
+        request: EmbeddingProviderRequest,
+    ) -> EmbeddingProviderResult:
         calls.append(f"embedding:{request['provider']}:{request['model']}:{request['text']}")
         return {
             "vector": [1.0, 0.0, 0.0],
@@ -728,7 +760,9 @@ def test_harness_client_stores_inactive_host_registration_reason(
     client.stop()
 
 
-def test_harness_client_cancellation_and_memory_operation_errors(tmp_path: Path) -> None:
+def test_harness_client_cancellation_and_memory_operation_errors(
+    tmp_path: Path,
+) -> None:
     script = _write_fake_harness(
         tmp_path,
         _common_harness("""
@@ -751,7 +785,9 @@ def test_harness_client_cancellation_and_memory_operation_errors(tmp_path: Path)
     client.stop()
 
 
-def test_harness_client_rejects_pending_requests_on_process_exit(tmp_path: Path) -> None:
+def test_harness_client_rejects_pending_requests_on_process_exit(
+    tmp_path: Path,
+) -> None:
     script = _write_fake_harness(
         tmp_path,
         "import time, sys\ntime.sleep(0.02)\nsys.exit(7)\n",
@@ -807,17 +843,122 @@ def test_real_agentpm_harness_process_when_fixture_env_is_set() -> None:
     workspace = os.environ.get("AGENTPM_HARNESS_WORKSPACE")
     if not cli or not workspace or not Path(cli).exists() or not Path(workspace).exists():
         pytest.skip("AGENTPM_HARNESS_CLI and AGENTPM_HARNESS_WORKSPACE are not set")
+    embedding_provider_id = os.environ.get("AGENTPM_HARNESS_EMBEDDING_PROVIDER", "embedder")
+    embedding_space_provider = os.environ.get("AGENTPM_HARNESS_EMBEDDING_SPACE_PROVIDER", "manual")
+    embedding_space_model = os.environ.get("AGENTPM_HARNESS_EMBEDDING_SPACE_MODEL", "toy-3d")
+    embedding_dimensions = int(os.environ.get("AGENTPM_HARNESS_EMBEDDING_DIMENSIONS", "3"))
+    embedding_normalized = os.environ.get("AGENTPM_HARNESS_EMBEDDING_NORMALIZED", "true") != "false"
+    knowledge_runtime_id = os.environ.get("AGENTPM_HARNESS_KNOWLEDGE_RUNTIME", "kb")
+    knowledge_package = os.environ.get("AGENTPM_HARNESS_KNOWLEDGE_PACKAGE", "@zack/manual-context")
+    knowledge_version = os.environ.get("AGENTPM_HARNESS_KNOWLEDGE_VERSION", "0.1.0")
+    embedding_knowledge_package = os.environ.get(
+        "AGENTPM_HARNESS_EMBEDDING_KNOWLEDGE_PACKAGE", "@zack/manual-vector"
+    )
     client = HarnessClient(agentpm_path=cli, cwd=workspace)
     calls: list[str] = []
+    model_calls = 0
 
     def model_provider(_: Any) -> dict[str, Any]:
+        nonlocal model_calls
         calls.append("model")
+        model_calls += 1
+        if model_calls == 1:
+            return {
+                "assistant_content": None,
+                "actions": [
+                    {
+                        "id": "sdk-real-cli-knowledge",
+                        "action": {
+                            "type": "knowledge_request",
+                            "package": knowledge_package,
+                            "mode": "context_document",
+                            "document": "knowledge/docs/overview.md",
+                            "return_citations": True,
+                        },
+                    },
+                    {
+                        "id": "sdk-real-cli-embedding",
+                        "action": {
+                            "type": "knowledge_request",
+                            "package": embedding_knowledge_package,
+                            "mode": "vector_query",
+                            "query": "real CLI SDK embedding query",
+                            "top_k": 1,
+                            "return_citations": True,
+                        },
+                    },
+                ],
+                "usage": {},
+                "finish_reason": "tool_calls",
+                "provider_metadata": {},
+            }
+        outcome = "answer" if model_calls == 2 else "complete"
         return {
-            "assistant_content": "real CLI SDK host model response",
-            "actions": [],
+            "assistant_content": None,
+            "actions": [
+                {
+                    "id": "sdk-real-cli-complete",
+                    "action": {
+                        "type": "phase_completion",
+                        "outcome": outcome,
+                        "output": {
+                            "message": "real CLI SDK host model response",
+                        },
+                    },
+                },
+            ],
             "usage": {},
-            "finish_reason": "stop",
+            "finish_reason": "tool_calls",
             "provider_metadata": {},
+        }
+
+    def embedding_provider(
+        request: EmbeddingProviderRequest,
+    ) -> EmbeddingProviderResult:
+        calls.append(f"embedding:{request['provider']}:{request['model']}:{request['text']}")
+        return {
+            "vector": [1.0 if index == 0 else 0.0 for index in range(request["dimensions"])],
+            "provider": request["provider"],
+            "model": request["model"],
+            "dimensions": request["dimensions"],
+            "normalized": request["normalized"],
+        }
+
+    def knowledge_runtime(request: KnowledgeRuntimeRequest) -> KnowledgeRuntimeResult:
+        calls.append(f"knowledge:{request['package']}:{request['mode']}:{request.get('query', '')}")
+        return {
+            "ok": True,
+            "package": request["package"],
+            "version": request["version"],
+            "mode": request["mode"],
+            "document": request.get("document"),
+            "query": request.get("query"),
+            "content": (
+                "real CLI Python SDK host Knowledge document" if request.get("document") else ""
+            ),
+            "results": (
+                [
+                    {
+                        "rank": 1,
+                        "score": 1.0,
+                        "chunk_id": "sdk-real-cli-chunk",
+                        "source_id": "sdk-real-cli-source",
+                        "text": "real CLI Python SDK host Knowledge result",
+                    }
+                ]
+                if request.get("query")
+                else []
+            ),
+            "citations": (
+                [
+                    {
+                        "chunk_id": "sdk-real-cli-chunk",
+                        "source_id": "sdk-real-cli-source",
+                    }
+                ]
+                if request.get("return_citations")
+                else []
+            ),
         }
 
     def before_model_request(_: Any) -> BeforeModelRequestDecision:
@@ -835,13 +976,52 @@ def test_real_agentpm_harness_process_when_fixture_env_is_set() -> None:
     client.register_model_provider("company-model", model_provider).on_before_model_request(
         before_model_request
     ).on_before_tool_call(before_tool_call).on_approval(approval)
+    client.register_embedding_provider(
+        embedding_provider_id,
+        embedding_provider,
+        {
+            "embedding_spaces": [
+                {
+                    "provider": embedding_space_provider,
+                    "model": embedding_space_model,
+                    "dimensions": embedding_dimensions,
+                    "normalized": embedding_normalized,
+                }
+            ]
+        },
+    )
+    client.register_knowledge_runtime(
+        knowledge_runtime_id,
+        knowledge_runtime,
+        {
+            "modes": ["context_document", "vector_query"],
+            "features": ["citations"],
+            "packages": [
+                {
+                    "package": knowledge_package,
+                    "version": knowledge_version,
+                    "ready": True,
+                }
+            ],
+        },
+    )
 
     info = client.initialize()
     assert info["session"] == {"protocol": "agentpm-harness-machine", "version": 1}
+    assert {
+        "role": "embedding",
+        "registry_id": embedding_provider_id,
+    } in (info.get("required_host_services") or [])
+    assert {
+        "role": "knowledge",
+        "registry_id": knowledge_runtime_id,
+    } in (info.get("required_host_services") or [])
     result = client.run("Run the SDK real CLI integration fixture.")
     assert result["status"] == "ended"
     assert "output" in result
     assert "report" in result
     assert "model" in calls
     assert "before_model_request" in calls
+    assert any(call.startswith("knowledge:") for call in calls)
+    assert any(call.startswith("embedding:") for call in calls)
     client.shutdown()
