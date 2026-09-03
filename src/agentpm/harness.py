@@ -1271,7 +1271,7 @@ def _optional_usage_int(value: Any) -> int | None:
 def _optional_usage_number(value: Any) -> int | float | None:
     return (
         value
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
         else None
     )
 
