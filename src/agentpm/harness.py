@@ -5,10 +5,11 @@ import math
 import os
 import queue
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Literal, NotRequired, Required, TypedDict, cast, overload
+from typing import Any, Literal, NotRequired, Required, TextIO, TypedDict, cast, overload
 
 JsonValue = str | int | float | bool | None | dict[str, Any] | list[Any]
 HarnessHookId = Literal[
@@ -22,6 +23,14 @@ HarnessHookId = Literal[
     "before_memory_operation",
 ]
 HarnessServiceRole = Literal["model", "embedding", "hook", "knowledge", "memory", "approval"]
+AgentpmServiceFrameKind = Literal[
+    "initialize",
+    "initialized",
+    "request",
+    "response",
+    "event",
+    "error",
+]
 
 HostServiceHandler = Callable[["HostServiceRequest"], JsonValue]
 ApprovalHandler = Callable[[JsonValue], str | dict[str, Any]]
@@ -410,6 +419,8 @@ BeforeMemoryOperationHookHandler = Callable[
 
 PROTOCOL = "agentpm-harness-machine"
 VERSION = 1
+SERVICE_PROTOCOL = "agentpm-service"
+SERVICE_VERSION = 1
 DEFAULT_HOOK_REGISTRY_ID = "sdk-hooks"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 
@@ -418,6 +429,94 @@ class HarnessProtocolError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def serve_knowledge_runtime_process(
+    registry_id: str,
+    handler: KnowledgeRuntimeHandler,
+    capabilities: KnowledgeProviderCapabilities,
+    *,
+    input_stream: TextIO | None = None,
+    output_stream: TextIO | None = None,
+    ready: bool = True,
+) -> None:
+    input_stream = input_stream or sys.stdin
+    output_stream = output_stream or sys.stdout
+
+    def write(frame: dict[str, Any]) -> None:
+        output_stream.write(
+            json.dumps(
+                {
+                    "protocol": SERVICE_PROTOCOL,
+                    "version": SERVICE_VERSION,
+                    **frame,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        output_stream.flush()
+
+    def write_error(frame: dict[str, Any], code: str, error: Exception) -> None:
+        write(
+            {
+                "kind": "error",
+                "id": frame.get("id"),
+                "service": frame.get("service") or "knowledge",
+                "error": {
+                    "code": code,
+                    "message": str(error) or error.__class__.__name__,
+                    "retryable": False,
+                },
+            }
+        )
+
+    for line in input_stream:
+        if not line.strip():
+            continue
+        frame: dict[str, Any] = {"service": "knowledge"}
+        try:
+            parsed = json.loads(line)
+            if not isinstance(parsed, dict):
+                raise RuntimeError("service frame must be an object")
+            frame = parsed
+            if frame.get("protocol") != SERVICE_PROTOCOL:
+                raise RuntimeError(f"unsupported service protocol {frame.get('protocol')}")
+            if frame.get("version") != SERVICE_VERSION:
+                raise RuntimeError(f"unsupported service protocol version {frame.get('version')}")
+            if frame.get("service") != "knowledge":
+                raise RuntimeError(f"unsupported service {frame.get('service')}")
+
+            if frame.get("kind") == "initialize":
+                write(
+                    {
+                        "kind": "initialized",
+                        "id": frame.get("id"),
+                        "service": "knowledge",
+                        "result": {
+                            **capabilities,
+                            "registry_id": registry_id,
+                            "ready": ready,
+                        },
+                    }
+                )
+                continue
+
+            if frame.get("kind") != "request":
+                raise RuntimeError(f"unsupported service frame kind {frame.get('kind')}")
+            if frame.get("method") != "retrieve":
+                raise RuntimeError(f"Unsupported KnowledgeRuntime method {frame.get('method')}")
+
+            write(
+                {
+                    "kind": "response",
+                    "id": frame.get("id"),
+                    "service": "knowledge",
+                    "result": handler(_extract_knowledge_runtime_request(frame.get("payload"))),
+                }
+            )
+        except Exception as exc:
+            write_error(frame, "knowledge_runtime_error", exc)
 
 
 @dataclass(frozen=True)
@@ -1278,4 +1377,5 @@ __all__ = [
     "HostServiceRegistration",
     "HostServiceRegistrationResult",
     "HostServiceRequest",
+    "serve_knowledge_runtime_process",
 ]

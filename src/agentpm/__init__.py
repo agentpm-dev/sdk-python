@@ -73,6 +73,7 @@ __all__ = [
     "load_memory_contract",
     "load_profile",
     "load_skill",
+    "serve_knowledge_runtime_process",
     "to_langchain_tool",
 ]
 
@@ -149,6 +150,7 @@ from .harness import (
     MemoryPackageRealization,
     MemoryProviderCapabilities,
     ModelProviderCapabilities,
+    serve_knowledge_runtime_process,
 )
 
 try:

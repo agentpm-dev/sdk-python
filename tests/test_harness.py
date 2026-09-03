@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -25,8 +26,10 @@ from agentpm import (
     HarnessClient,
     HarnessProtocolError,
     HookDecision,
+    KnowledgeProviderCapabilities,
     KnowledgeRuntimeRequest,
     KnowledgeRuntimeResult,
+    serve_knowledge_runtime_process,
 )
 
 
@@ -122,6 +125,195 @@ def test_harness_client_passes_installed_agent_refs_as_positional_selector(
         "--machine",
     ]
     client.stop()
+
+
+def test_serve_knowledge_runtime_process_serves_initialize_and_retrieve() -> None:
+    calls: list[KnowledgeRuntimeRequest] = []
+    capabilities: KnowledgeProviderCapabilities = {
+        "modes": ["vector_query"],
+        "features": ["citations"],
+        "packages": [
+            {
+                "package": "@zack/m13-reference-corpus",
+                "version": "0.1.0",
+                "corpus": "sha256:corpus",
+                "ready": True,
+            }
+        ],
+    }
+
+    def handler(request: KnowledgeRuntimeRequest) -> KnowledgeRuntimeResult:
+        calls.append(request)
+        result: KnowledgeRuntimeResult = {
+            "ok": True,
+            "package": request["package"],
+            "version": request["version"],
+            "mode": request["mode"],
+            "results": [
+                {
+                    "rank": 1,
+                    "score": 0.98,
+                    "chunk_id": "chunk-alpha",
+                    "source_id": "source-alpha",
+                    "text": "alpha result",
+                }
+            ],
+            "citations": [{"chunk_id": "chunk-alpha", "source_id": "source-alpha"}],
+        }
+        if "query" in request:
+            result["query"] = request["query"]
+        return result
+
+    input_stream = io.StringIO(
+        json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "initialize",
+                "id": "init-1",
+                "service": "knowledge",
+                "method": "initialize",
+                "payload": {
+                    "role": "knowledge",
+                    "registry_id": "pinecone-reference",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "request",
+                "id": "req-1",
+                "service": "knowledge",
+                "method": "retrieve",
+                "payload": {
+                    "request": {
+                        "package": "@zack/m13-reference-corpus",
+                        "version": "0.1.0",
+                        "mode": "vector_query",
+                        "query": "launch checklist",
+                        "top_k": 1,
+                        "return_citations": True,
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    output_stream = io.StringIO()
+
+    serve_knowledge_runtime_process(
+        "pinecone-reference",
+        handler,
+        capabilities,
+        input_stream=input_stream,
+        output_stream=output_stream,
+    )
+
+    lines = [json.loads(line) for line in output_stream.getvalue().splitlines()]
+    assert calls == [
+        {
+            "package": "@zack/m13-reference-corpus",
+            "version": "0.1.0",
+            "mode": "vector_query",
+            "query": "launch checklist",
+            "top_k": 1,
+            "return_citations": True,
+        }
+    ]
+    assert lines == [
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "initialized",
+            "id": "init-1",
+            "service": "knowledge",
+            "result": {
+                **capabilities,
+                "registry_id": "pinecone-reference",
+                "ready": True,
+            },
+        },
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "response",
+            "id": "req-1",
+            "service": "knowledge",
+            "result": {
+                "ok": True,
+                "package": "@zack/m13-reference-corpus",
+                "version": "0.1.0",
+                "mode": "vector_query",
+                "query": "launch checklist",
+                "results": [
+                    {
+                        "rank": 1,
+                        "score": 0.98,
+                        "chunk_id": "chunk-alpha",
+                        "source_id": "source-alpha",
+                        "text": "alpha result",
+                    }
+                ],
+                "citations": [{"chunk_id": "chunk-alpha", "source_id": "source-alpha"}],
+            },
+        },
+    ]
+
+
+def test_serve_knowledge_runtime_process_returns_service_error_frames() -> None:
+    capabilities: KnowledgeProviderCapabilities = {
+        "modes": ["vector_query"],
+        "features": ["citations"],
+    }
+    input_stream = io.StringIO(
+        json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "request",
+                "id": "req-err",
+                "service": "knowledge",
+                "method": "retrieve",
+                "payload": {
+                    "package": "@zack/m13-reference-corpus",
+                    "version": "0.1.0",
+                    "mode": "vector_query",
+                    "query": "launch checklist",
+                },
+            }
+        )
+        + "\n"
+    )
+    output_stream = io.StringIO()
+
+    def handler(_: KnowledgeRuntimeRequest) -> KnowledgeRuntimeResult:
+        raise RuntimeError("backend unavailable")
+
+    serve_knowledge_runtime_process(
+        "pgvector-reference",
+        handler,
+        capabilities,
+        input_stream=input_stream,
+        output_stream=output_stream,
+    )
+
+    assert [json.loads(line) for line in output_stream.getvalue().splitlines()] == [
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "error",
+            "id": "req-err",
+            "service": "knowledge",
+            "error": {
+                "code": "knowledge_runtime_error",
+                "message": "backend unavailable",
+                "retryable": False,
+            },
+        }
+    ]
 
 
 def test_harness_client_iterates_buffered_and_future_events_once(
@@ -926,13 +1118,11 @@ def test_real_agentpm_harness_process_when_fixture_env_is_set() -> None:
 
     def knowledge_runtime(request: KnowledgeRuntimeRequest) -> KnowledgeRuntimeResult:
         calls.append(f"knowledge:{request['package']}:{request['mode']}:{request.get('query', '')}")
-        return {
+        result: KnowledgeRuntimeResult = {
             "ok": True,
             "package": request["package"],
             "version": request["version"],
             "mode": request["mode"],
-            "document": request.get("document"),
-            "query": request.get("query"),
             "content": (
                 "real CLI Python SDK host Knowledge document" if request.get("document") else ""
             ),
@@ -960,6 +1150,11 @@ def test_real_agentpm_harness_process_when_fixture_env_is_set() -> None:
                 else []
             ),
         }
+        if "document" in request:
+            result["document"] = request["document"]
+        if "query" in request:
+            result["query"] = request["query"]
+        return result
 
     def before_model_request(_: Any) -> BeforeModelRequestDecision:
         calls.append("before_model_request")

@@ -192,6 +192,8 @@ The convenience Hook helpers use contract-specific type hints. `on_before_model_
 
 Host capability advertisement is role-specific. `register_model_provider` automatically advertises the registry ID as `provider` plus semantic-action, structured-output, multimodal-input, and usage-reporting flags; pass model-specific overrides such as `model` or `context_window_tokens` when known. `register_embedding_provider` registers the Milestone 12 `embed` contract and advertises supported embedding spaces. `register_knowledge_runtime` registers the Milestone 12 `retrieve` contract and advertises supported modes/features/package attestations. `register_host_provider` remains available for lower-level role-specific capability shapes. `on_approval` advertises approval support and optional cancellation support. After initialization, `host_service_registration(role, registry_id)` exposes the Harness registration result, including `active: false` and a reason when Harness rejects a registration.
 
+For CLI-launched custom Knowledge runtimes, use `serve_knowledge_runtime_process(registry_id, handler, capabilities)` to serve the public `agentpm-service` JSONL process protocol from a Python provider process. The Pinecone and pgvector reference providers live in <https://github.com/agentpm-dev/agentpm-examples/tree/main/knowledge-packages/m13-reference-providers>; they are examples to copy from, not provider-specific SDK exports.
+
 ### Load an installed skill package
 
 ```python
