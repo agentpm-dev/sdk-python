@@ -351,10 +351,13 @@ class BeforeMemoryReadInput(TypedDict, total=False):
     package: Required[str]
     space: Required[str]
     scope: Required[JsonValue]
+    record_id: str
+    record_type: str
     query: str
     filter: JsonValue
     limit: int
     mode: str
+    retrieval_modes: Required[list[str]]
 
 
 class BeforeMemoryReadPatch(TypedDict, total=False):
@@ -377,7 +380,9 @@ class BeforeMemoryWriteInput(TypedDict):
     phase_id: str
     package: str
     space: str
+    operation: str
     record_type: str
+    record_id: NotRequired[str]
     scope: JsonValue
     content: JsonValue
 
