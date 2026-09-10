@@ -979,15 +979,21 @@ def test_harness_client_cancellation_and_memory_operation_errors(
                 elif frame.get("method") == "cancel_run":
                     write({"kind": "response", "id": frame["id"], "payload": {"accepted": True, "status": "cancelled"}})
                 elif frame.get("method") == "memory_operation":
-                    write({"kind": "error", "id": frame["id"], "error": {"code": "memory_operation_unavailable", "message": "not live yet"}})
+                    write({"kind": "error", "id": frame["id"], "error": {"code": "memory_operation_no_active_run", "message": "external Memory-operation control requires an active Harness Run"}})
             """),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     client.initialize()
     assert client.cancel_run() == {"accepted": True, "status": "cancelled"}
     with pytest.raises(HarnessProtocolError) as err:
-        client.invoke_memory_operation({"operation": "compact"})
-    assert err.value.code == "memory_operation_unavailable"
+        client.invoke_memory_operation(
+            {
+                "package": "machine-memory-test",
+                "operation": "external_delete_notes",
+                "current_resolved_scope": {"user": "user-123"},
+            }
+        )
+    assert err.value.code == "memory_operation_no_active_run"
     client.stop()
 
 

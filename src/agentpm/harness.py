@@ -400,12 +400,41 @@ BeforeMemoryWriteDecision = BeforeMemoryWriteContinueDecision | HookRejectDecisi
 BeforeMemoryWriteHookHandler = Callable[[BeforeMemoryWriteInput], BeforeMemoryWriteDecision | None]
 
 
+class BeforeMemoryOperationSource(TypedDict, total=False):
+    space: Required[str]
+    record_type: str
+    active_count: Required[int]
+
+
+class BeforeMemoryOperationSummary(TypedDict, total=False):
+    package: Required[str]
+    package_version: Required[str]
+    operation: Required[str]
+    operation_type: Required[str]
+    description: Required[str]
+    trigger: Required[JsonValue]
+    inputs: Required[JsonValue]
+    output: JsonValue
+    targets: Required[JsonValue]
+    source_handling: str
+    output_mode: str
+    preserve_provenance: bool
+    cascade_derived_records: bool
+    binding_scope: Required[str]
+
+
+class BeforeMemoryOperationSourceSummary(TypedDict):
+    operation: BeforeMemoryOperationSummary
+    referenced_spaces: list[str]
+    sources: list[BeforeMemoryOperationSource]
+
+
 class BeforeMemoryOperationInput(TypedDict):
     phase_id: str
     package: str
     operation: str
-    scope: JsonValue
-    source_summary: JsonValue
+    scope: dict[str, str]
+    source_summary: BeforeMemoryOperationSourceSummary
 
 
 class BeforeMemoryOperationPatch(TypedDict, total=False):
