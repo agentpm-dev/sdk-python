@@ -109,6 +109,15 @@ class KnowledgeRuntimeResult(TypedDict, total=False):
 
 
 KnowledgeRuntimeHandler = Callable[[KnowledgeRuntimeRequest], KnowledgeRuntimeResult]
+MemoryRuntimeMethod = Literal[
+    "read",
+    "write",
+    "count",
+    "load_operation_state",
+    "store_operation_state",
+    "commit_lifecycle",
+]
+MemoryRuntimeHandler = Callable[[MemoryRuntimeMethod, JsonValue], JsonValue]
 
 
 class HostServiceRegistration(TypedDict):
@@ -457,6 +466,14 @@ SERVICE_PROTOCOL = "agentpm-service"
 SERVICE_VERSION = 1
 DEFAULT_HOOK_REGISTRY_ID = "sdk-hooks"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+MEMORY_RUNTIME_METHODS: set[str] = {
+    "read",
+    "write",
+    "count",
+    "load_operation_state",
+    "store_operation_state",
+    "commit_lifecycle",
+}
 
 
 class HarnessProtocolError(RuntimeError):
@@ -551,6 +568,95 @@ def serve_knowledge_runtime_process(
             )
         except Exception as exc:
             write_error(frame, "knowledge_runtime_error", exc)
+
+
+def serve_memory_runtime_process(
+    registry_id: str,
+    handler: MemoryRuntimeHandler,
+    capabilities: MemoryProviderCapabilities,
+    *,
+    input_stream: TextIO | None = None,
+    output_stream: TextIO | None = None,
+    ready: bool = True,
+) -> None:
+    input_stream = input_stream or sys.stdin
+    output_stream = output_stream or sys.stdout
+
+    def write(frame: dict[str, Any]) -> None:
+        output_stream.write(
+            json.dumps(
+                {
+                    "protocol": SERVICE_PROTOCOL,
+                    "version": SERVICE_VERSION,
+                    **frame,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        output_stream.flush()
+
+    def write_error(frame: dict[str, Any], code: str, error: Exception) -> None:
+        write(
+            {
+                "kind": "error",
+                "id": frame.get("id"),
+                "service": frame.get("service") or "memory",
+                "error": {
+                    "code": code,
+                    "message": str(error) or error.__class__.__name__,
+                    "retryable": False,
+                },
+            }
+        )
+
+    for line in input_stream:
+        if not line.strip():
+            continue
+        frame: dict[str, Any] = {"service": "memory"}
+        try:
+            parsed = json.loads(line)
+            if not isinstance(parsed, dict):
+                raise RuntimeError("service frame must be an object")
+            frame = parsed
+            if frame.get("protocol") != SERVICE_PROTOCOL:
+                raise RuntimeError(f"unsupported service protocol {frame.get('protocol')}")
+            if frame.get("version") != SERVICE_VERSION:
+                raise RuntimeError(f"unsupported service protocol version {frame.get('version')}")
+            if frame.get("service") != "memory":
+                raise RuntimeError(f"unsupported service {frame.get('service')}")
+
+            if frame.get("kind") == "initialize":
+                write(
+                    {
+                        "kind": "initialized",
+                        "id": frame.get("id"),
+                        "service": "memory",
+                        "result": {
+                            **capabilities,
+                            "registry_id": registry_id,
+                            "ready": ready,
+                        },
+                    }
+                )
+                continue
+
+            if frame.get("kind") != "request":
+                raise RuntimeError(f"unsupported service frame kind {frame.get('kind')}")
+            method = frame.get("method")
+            if method not in MEMORY_RUNTIME_METHODS:
+                raise RuntimeError(f"Unsupported MemoryRuntime method {method}")
+
+            write(
+                {
+                    "kind": "response",
+                    "id": frame.get("id"),
+                    "service": "memory",
+                    "result": handler(cast(MemoryRuntimeMethod, method), frame.get("payload")),
+                }
+            )
+        except Exception as exc:
+            write_error(frame, "memory_runtime_error", exc)
 
 
 @dataclass(frozen=True)
@@ -799,6 +905,24 @@ class HarnessClient:
             "knowledge",
             registry_id,
             knowledge_handler,
+            capabilities=cast(JsonValue, capabilities),
+        )
+
+    def register_memory_runtime(
+        self,
+        registry_id: str,
+        handler: MemoryRuntimeHandler,
+        capabilities: MemoryProviderCapabilities,
+    ) -> HarnessClient:
+        def memory_handler(request: HostServiceRequest) -> JsonValue:
+            if request.method not in MEMORY_RUNTIME_METHODS:
+                raise RuntimeError(f"Unsupported MemoryRuntime method {request.method}")
+            return handler(cast(MemoryRuntimeMethod, request.method), request.payload)
+
+        return self.register_host_service(
+            "memory",
+            registry_id,
+            memory_handler,
             capabilities=cast(JsonValue, capabilities),
         )
 
@@ -1411,5 +1535,8 @@ __all__ = [
     "HostServiceRegistration",
     "HostServiceRegistrationResult",
     "HostServiceRequest",
+    "MemoryRuntimeHandler",
+    "MemoryRuntimeMethod",
     "serve_knowledge_runtime_process",
+    "serve_memory_runtime_process",
 ]

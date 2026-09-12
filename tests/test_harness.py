@@ -31,7 +31,10 @@ from agentpm import (
     KnowledgeProviderCapabilities,
     KnowledgeRuntimeRequest,
     KnowledgeRuntimeResult,
+    MemoryProviderCapabilities,
+    MemoryRuntimeMethod,
     serve_knowledge_runtime_process,
+    serve_memory_runtime_process,
 )
 
 
@@ -68,7 +71,8 @@ def test_harness_client_initializes_streams_events_runs_and_shuts_down(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             for line in sys.stdin:
                 frame = json.loads(line)
                 if frame.get("method") == "initialize":
@@ -81,7 +85,8 @@ def test_harness_client_initializes_streams_events_runs_and_shuts_down(
                 elif frame.get("method") == "shutdown":
                     write({"kind": "response", "id": frame["id"], "payload": {"shutdown": True}})
                     break
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     assert client.wait_for_event(lambda event: event.get("status") == "ready")["status"] == "ready"
@@ -318,6 +323,189 @@ def test_serve_knowledge_runtime_process_returns_service_error_frames() -> None:
     ]
 
 
+def test_serve_memory_runtime_process_serves_initialize_and_methods() -> None:
+    calls: list[tuple[MemoryRuntimeMethod, Any]] = []
+    capabilities: MemoryProviderCapabilities = {
+        "descriptor": {
+            "space_models": ["document", "collection", "sequence"],
+            "retrieval_modes": ["key", "filter", "chronological", "full_text", "semantic"],
+            "retention_actions": ["delete", "archive"],
+            "constraints": ["append_only"],
+            "capacity": True,
+            "durable_trigger_state": True,
+            "atomic_batches": True,
+        },
+        "packages": [
+            {
+                "package": "@zack/m16-reference-memory",
+                "version": "0.1.0",
+                "ready": True,
+            }
+        ],
+    }
+
+    def handler(method: MemoryRuntimeMethod, payload: Any) -> dict[str, Any]:
+        calls.append((method, payload))
+        return {
+            "ok": True,
+            "package": "@zack/m16-reference-memory",
+            "package_version": "0.1.0",
+            "space": "notes",
+            "count": 2,
+        }
+
+    input_stream = io.StringIO(
+        json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "initialize",
+                "id": "init-1",
+                "service": "memory",
+                "method": "initialize",
+                "payload": {
+                    "role": "memory",
+                    "registry_id": "pgvector-memory-reference",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "request",
+                "id": "req-1",
+                "service": "memory",
+                "method": "count",
+                "payload": {
+                    "request": {
+                        "package": "@zack/m16-reference-memory",
+                        "package_version": "0.1.0",
+                        "space": "notes",
+                        "scope": {"user": "zack"},
+                        "record_type": "note",
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    output_stream = io.StringIO()
+
+    serve_memory_runtime_process(
+        "pgvector-memory-reference",
+        handler,
+        capabilities,
+        input_stream=input_stream,
+        output_stream=output_stream,
+    )
+
+    assert calls == [
+        (
+            "count",
+            {
+                "request": {
+                    "package": "@zack/m16-reference-memory",
+                    "package_version": "0.1.0",
+                    "space": "notes",
+                    "scope": {"user": "zack"},
+                    "record_type": "note",
+                }
+            },
+        )
+    ]
+    assert [json.loads(line) for line in output_stream.getvalue().splitlines()] == [
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "initialized",
+            "id": "init-1",
+            "service": "memory",
+            "result": {
+                **capabilities,
+                "registry_id": "pgvector-memory-reference",
+                "ready": True,
+            },
+        },
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "response",
+            "id": "req-1",
+            "service": "memory",
+            "result": {
+                "ok": True,
+                "package": "@zack/m16-reference-memory",
+                "package_version": "0.1.0",
+                "space": "notes",
+                "count": 2,
+            },
+        },
+    ]
+
+
+def test_serve_memory_runtime_process_returns_service_error_frames() -> None:
+    capabilities: MemoryProviderCapabilities = {
+        "descriptor": {
+            "space_models": ["document", "collection", "sequence"],
+            "retrieval_modes": ["key", "filter", "chronological"],
+            "retention_actions": ["delete", "archive"],
+            "constraints": ["append_only"],
+            "capacity": True,
+            "durable_trigger_state": True,
+            "atomic_batches": True,
+        }
+    }
+    input_stream = io.StringIO(
+        json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "request",
+                "id": "req-err",
+                "service": "memory",
+                "method": "commit_lifecycle",
+                "payload": {
+                    "request": {
+                        "package": "@zack/m16-reference-memory",
+                        "package_version": "0.1.0",
+                        "operation": "summarize_notes",
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    output_stream = io.StringIO()
+
+    def handler(_: MemoryRuntimeMethod, __: Any) -> dict[str, Any]:
+        raise RuntimeError("memory backend unavailable")
+
+    serve_memory_runtime_process(
+        "redis-memory-reference",
+        handler,
+        capabilities,
+        input_stream=input_stream,
+        output_stream=output_stream,
+    )
+
+    assert [json.loads(line) for line in output_stream.getvalue().splitlines()] == [
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "error",
+            "id": "req-err",
+            "service": "memory",
+            "error": {
+                "code": "memory_runtime_error",
+                "message": "memory backend unavailable",
+                "retryable": False,
+            },
+        }
+    ]
+
+
 def test_harness_client_iterates_buffered_and_future_events_once(
     tmp_path: Path,
 ) -> None:
@@ -355,7 +543,8 @@ def test_harness_client_routes_model_hook_and_approval_callbacks(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             start_run_id = None
             model_usage = None
             for line in sys.stdin:
@@ -374,7 +563,8 @@ def test_harness_client_routes_model_hook_and_approval_callbacks(
                     write({"kind": "request", "id": "host-approval-1", "method": "host_service", "payload": {"role": "approval", "registry_id": "controller", "method": "request_approval", "payload": {"checkpoint": {"id": "gate"}}}})
                 elif frame.get("kind") == "response" and frame.get("id") == "host-approval-1":
                     write({"kind": "response", "id": start_run_id, "payload": {"status": "ended", "output": {"approval": frame["payload"]["decision"], "model_usage": model_usage}, "report": {}}})
-            """),
+            """
+        ),
     )
     calls: list[str] = []
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
@@ -432,7 +622,8 @@ def test_harness_client_routes_model_hook_and_approval_callbacks(
 def test_harness_client_maps_callback_timeouts_to_error_frames(tmp_path: Path) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             start_run_id = None
             for line in sys.stdin:
                 frame = json.loads(line)
@@ -445,7 +636,8 @@ def test_harness_client_maps_callback_timeouts_to_error_frames(tmp_path: Path) -
                     write({"kind": "request", "id": "host-hook-timeout", "method": "host_service", "payload": {"role": "hook", "registry_id": "sdk-hooks", "method": "before_tool_call", "payload": {"input": {"arguments": {}}}}})
                 elif frame.get("kind") == "error" and frame.get("id") == "host-hook-timeout":
                     write({"kind": "response", "id": start_run_id, "payload": {"status": "ended", "output": {"code": frame["error"]["code"]}, "report": {}}})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
@@ -465,7 +657,8 @@ def test_harness_client_registers_repeated_hooks_as_ordered_bindings(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             registrations = []
             start_run_id = None
             for line in sys.stdin:
@@ -482,7 +675,8 @@ def test_harness_client_registers_repeated_hooks_as_ordered_bindings(
                     write({"kind": "request", "id": "hook-b", "method": "host_service", "payload": {"role": "hook", "registry_id": registrations[1], "method": "before_tool_selection", "payload": {"input": {"candidates": [{"canonical_id": "t1"}]}}}})
                 elif frame.get("kind") == "response" and frame.get("id") == "hook-b":
                     write({"kind": "response", "id": start_run_id, "payload": {"status": "ended", "output": {"registrations": registrations, "second": frame["payload"]["patch"]["candidate_ids"]}, "report": {}}})
-            """),
+            """
+        ),
     )
     seen: list[Any] = []
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
@@ -508,7 +702,8 @@ def test_harness_client_registers_repeated_hooks_as_ordered_bindings(
 def test_harness_client_advertises_typed_hook_helpers(tmp_path: Path) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             registrations = []
             for line in sys.stdin:
                 frame = json.loads(line)
@@ -523,7 +718,8 @@ def test_harness_client_advertises_typed_hook_helpers(tmp_path: Path) -> None:
                     write({"kind": "response", "id": frame["id"], "payload": {"registered": True}})
                 elif frame.get("method") == "start_run":
                     write({"kind": "response", "id": frame["id"], "payload": {"status": "ended", "output": {"registrations": registrations}, "report": {}}})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
@@ -641,7 +837,8 @@ def test_harness_client_advertises_role_specific_host_service_capabilities(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             registrations = []
             for line in sys.stdin:
                 frame = json.loads(line)
@@ -657,7 +854,8 @@ def test_harness_client_advertises_role_specific_host_service_capabilities(
                     write({"kind": "response", "id": frame["id"], "payload": {"registered": True}})
                 elif frame.get("method") == "start_run":
                     write({"kind": "response", "id": frame["id"], "payload": {"status": "ended", "output": {"registrations": registrations}, "report": {}}})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     client.register_model_provider(
@@ -747,7 +945,8 @@ def test_harness_client_registers_typed_embedding_and_knowledge_providers(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             registrations = []
             start_run_id = None
             for line in sys.stdin:
@@ -786,7 +985,8 @@ def test_harness_client_registers_typed_embedding_and_knowledge_providers(
                         "output": {"registrations": registrations, "knowledge": frame["payload"]},
                         "report": {},
                     }})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     calls: list[str] = []
@@ -907,7 +1107,8 @@ def test_harness_client_flushes_registrations_added_after_initialize(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             registrations = []
             for line in sys.stdin:
                 frame = json.loads(line)
@@ -918,7 +1119,8 @@ def test_harness_client_flushes_registrations_added_after_initialize(
                     write({"kind": "response", "id": frame["id"], "payload": {"registered": True}})
                 elif frame.get("method") == "start_run":
                     write({"kind": "response", "id": frame["id"], "payload": {"status": "ended", "output": {"registrations": registrations}, "report": {}}})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
@@ -937,7 +1139,8 @@ def test_harness_client_stores_inactive_host_registration_reason(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             for line in sys.stdin:
                 frame = json.loads(line)
                 if frame.get("method") == "initialize":
@@ -949,7 +1152,8 @@ def test_harness_client_stores_inactive_host_registration_reason(
                         "active": False,
                         "reason": "configured KnowledgeRuntime could not attest the requested package",
                     }})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
 
@@ -971,7 +1175,8 @@ def test_harness_client_cancellation_and_memory_operation_errors(
 ) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             for line in sys.stdin:
                 frame = json.loads(line)
                 if frame.get("method") == "initialize":
@@ -980,7 +1185,8 @@ def test_harness_client_cancellation_and_memory_operation_errors(
                     write({"kind": "response", "id": frame["id"], "payload": {"accepted": True, "status": "cancelled"}})
                 elif frame.get("method") == "memory_operation":
                     write({"kind": "error", "id": frame["id"], "error": {"code": "memory_operation_no_active_run", "message": "external Memory-operation control requires an active Harness Run"}})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     client.initialize()
@@ -1037,11 +1243,13 @@ def test_harness_client_fails_fast_after_malformed_stdout(tmp_path: Path) -> Non
 def test_harness_client_exposes_protocol_error_codes(tmp_path: Path) -> None:
     script = _write_fake_harness(
         tmp_path,
-        _common_harness("""
+        _common_harness(
+            """
             for line in sys.stdin:
                 frame = json.loads(line)
                 write({"kind": "error", "id": frame["id"], "error": {"code": "bad_version", "message": "nope"}})
-            """),
+            """
+        ),
     )
     client = HarnessClient(agentpm_path=sys.executable, args=[script])
     with pytest.raises(HarnessProtocolError) as err:
