@@ -17,7 +17,9 @@ from agentpm import (
     BeforeKnowledgeRequestDecision,
     BeforeMemoryOperationDecision,
     BeforeMemoryReadDecision,
+    BeforeMemoryReadInput,
     BeforeMemoryWriteDecision,
+    BeforeMemoryWriteInput,
     BeforeModelRequestDecision,
     BeforeToolCallDecision,
     BeforeToolSelectionDecision,
@@ -29,7 +31,10 @@ from agentpm import (
     KnowledgeProviderCapabilities,
     KnowledgeRuntimeRequest,
     KnowledgeRuntimeResult,
+    MemoryProviderCapabilities,
+    MemoryRuntimeMethod,
     serve_knowledge_runtime_process,
+    serve_memory_runtime_process,
 )
 
 
@@ -318,6 +323,189 @@ def test_serve_knowledge_runtime_process_returns_service_error_frames() -> None:
     ]
 
 
+def test_serve_memory_runtime_process_serves_initialize_and_methods() -> None:
+    calls: list[tuple[MemoryRuntimeMethod, Any]] = []
+    capabilities: MemoryProviderCapabilities = {
+        "descriptor": {
+            "space_models": ["document", "collection", "sequence"],
+            "retrieval_modes": ["key", "filter", "chronological", "full_text", "semantic"],
+            "retention_actions": ["delete", "archive"],
+            "constraints": ["append_only"],
+            "capacity": True,
+            "durable_trigger_state": True,
+            "atomic_batches": True,
+        },
+        "packages": [
+            {
+                "package": "@zack/m16-reference-memory",
+                "version": "0.1.0",
+                "ready": True,
+            }
+        ],
+    }
+
+    def handler(method: MemoryRuntimeMethod, payload: Any) -> dict[str, Any]:
+        calls.append((method, payload))
+        return {
+            "ok": True,
+            "package": "@zack/m16-reference-memory",
+            "package_version": "0.1.0",
+            "space": "notes",
+            "count": 2,
+        }
+
+    input_stream = io.StringIO(
+        json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "initialize",
+                "id": "init-1",
+                "service": "memory",
+                "method": "initialize",
+                "payload": {
+                    "role": "memory",
+                    "registry_id": "pgvector-memory-reference",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "request",
+                "id": "req-1",
+                "service": "memory",
+                "method": "count",
+                "payload": {
+                    "request": {
+                        "package": "@zack/m16-reference-memory",
+                        "package_version": "0.1.0",
+                        "space": "notes",
+                        "scope": {"user": "zack"},
+                        "record_type": "note",
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    output_stream = io.StringIO()
+
+    serve_memory_runtime_process(
+        "pgvector-memory-reference",
+        handler,
+        capabilities,
+        input_stream=input_stream,
+        output_stream=output_stream,
+    )
+
+    assert calls == [
+        (
+            "count",
+            {
+                "request": {
+                    "package": "@zack/m16-reference-memory",
+                    "package_version": "0.1.0",
+                    "space": "notes",
+                    "scope": {"user": "zack"},
+                    "record_type": "note",
+                }
+            },
+        )
+    ]
+    assert [json.loads(line) for line in output_stream.getvalue().splitlines()] == [
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "initialized",
+            "id": "init-1",
+            "service": "memory",
+            "result": {
+                **capabilities,
+                "registry_id": "pgvector-memory-reference",
+                "ready": True,
+            },
+        },
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "response",
+            "id": "req-1",
+            "service": "memory",
+            "result": {
+                "ok": True,
+                "package": "@zack/m16-reference-memory",
+                "package_version": "0.1.0",
+                "space": "notes",
+                "count": 2,
+            },
+        },
+    ]
+
+
+def test_serve_memory_runtime_process_returns_service_error_frames() -> None:
+    capabilities: MemoryProviderCapabilities = {
+        "descriptor": {
+            "space_models": ["document", "collection", "sequence"],
+            "retrieval_modes": ["key", "filter", "chronological"],
+            "retention_actions": ["delete", "archive"],
+            "constraints": ["append_only"],
+            "capacity": True,
+            "durable_trigger_state": True,
+            "atomic_batches": True,
+        }
+    }
+    input_stream = io.StringIO(
+        json.dumps(
+            {
+                "protocol": "agentpm-service",
+                "version": 1,
+                "kind": "request",
+                "id": "req-err",
+                "service": "memory",
+                "method": "commit_lifecycle",
+                "payload": {
+                    "request": {
+                        "package": "@zack/m16-reference-memory",
+                        "package_version": "0.1.0",
+                        "operation": "summarize_notes",
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    output_stream = io.StringIO()
+
+    def handler(_: MemoryRuntimeMethod, __: Any) -> dict[str, Any]:
+        raise RuntimeError("memory backend unavailable")
+
+    serve_memory_runtime_process(
+        "redis-memory-reference",
+        handler,
+        capabilities,
+        input_stream=input_stream,
+        output_stream=output_stream,
+    )
+
+    assert [json.loads(line) for line in output_stream.getvalue().splitlines()] == [
+        {
+            "protocol": "agentpm-service",
+            "version": 1,
+            "kind": "error",
+            "id": "req-err",
+            "service": "memory",
+            "error": {
+                "code": "memory_runtime_error",
+                "message": "memory backend unavailable",
+                "retryable": False,
+            },
+        }
+    ]
+
+
 def test_harness_client_iterates_buffered_and_future_events_once(
     tmp_path: Path,
 ) -> None:
@@ -554,11 +742,23 @@ def test_harness_client_advertises_typed_hook_helpers(tmp_path: Path) -> None:
             },
         }
 
-    def before_memory_read(_: Any) -> BeforeMemoryReadDecision:
-        return {"decision": "continue", "patch": {"limit": 1}}
+    def before_memory_read(input: BeforeMemoryReadInput) -> BeforeMemoryReadDecision:
+        return {
+            "decision": "continue",
+            "patch": {"limit": 1, "mode": input["retrieval_modes"][0]},
+        }
 
-    def before_memory_write(_: Any) -> BeforeMemoryWriteDecision:
-        return {"decision": "continue", "patch": {"content": {"safe": True}}}
+    def before_memory_write(input: BeforeMemoryWriteInput) -> BeforeMemoryWriteDecision:
+        return {
+            "decision": "continue",
+            "patch": {
+                "content": {
+                    "safe": True,
+                    "operation": input["operation"],
+                    "record_id": input.get("record_id"),
+                }
+            },
+        }
 
     def before_memory_operation(_: Any) -> BeforeMemoryOperationDecision:
         return {
@@ -984,7 +1184,7 @@ def test_harness_client_cancellation_and_memory_operation_errors(
                 elif frame.get("method") == "cancel_run":
                     write({"kind": "response", "id": frame["id"], "payload": {"accepted": True, "status": "cancelled"}})
                 elif frame.get("method") == "memory_operation":
-                    write({"kind": "error", "id": frame["id"], "error": {"code": "memory_operation_unavailable", "message": "not live yet"}})
+                    write({"kind": "error", "id": frame["id"], "error": {"code": "memory_operation_no_active_run", "message": "external Memory-operation control requires an active Harness Run"}})
             """
         ),
     )
@@ -992,8 +1192,14 @@ def test_harness_client_cancellation_and_memory_operation_errors(
     client.initialize()
     assert client.cancel_run() == {"accepted": True, "status": "cancelled"}
     with pytest.raises(HarnessProtocolError) as err:
-        client.invoke_memory_operation({"operation": "compact"})
-    assert err.value.code == "memory_operation_unavailable"
+        client.invoke_memory_operation(
+            {
+                "package": "machine-memory-test",
+                "operation": "external_delete_notes",
+                "current_resolved_scope": {"user": "user-123"},
+            }
+        )
+    assert err.value.code == "memory_operation_no_active_run"
     client.stop()
 
 

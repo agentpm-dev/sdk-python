@@ -19,6 +19,9 @@ __all__ = [
     "BeforeMemoryOperationHookHandler",
     "BeforeMemoryOperationInput",
     "BeforeMemoryOperationPatch",
+    "BeforeMemoryOperationSource",
+    "BeforeMemoryOperationSourceSummary",
+    "BeforeMemoryOperationSummary",
     "BeforeMemoryReadDecision",
     "BeforeMemoryReadHookHandler",
     "BeforeMemoryReadInput",
@@ -63,6 +66,8 @@ __all__ = [
     "KnowledgeRuntimeResult",
     "MemoryPackageRealization",
     "MemoryProviderCapabilities",
+    "MemoryRuntimeHandler",
+    "MemoryRuntimeMethod",
     "ModelProviderCapabilities",
     "__version__",
     "load",
@@ -74,6 +79,7 @@ __all__ = [
     "load_profile",
     "load_skill",
     "serve_knowledge_runtime_process",
+    "serve_memory_runtime_process",
     "to_langchain_tool",
 ]
 
@@ -105,6 +111,9 @@ from .harness import (
     BeforeMemoryOperationHookHandler,
     BeforeMemoryOperationInput,
     BeforeMemoryOperationPatch,
+    BeforeMemoryOperationSource,
+    BeforeMemoryOperationSourceSummary,
+    BeforeMemoryOperationSummary,
     BeforeMemoryReadDecision,
     BeforeMemoryReadHookHandler,
     BeforeMemoryReadInput,
@@ -149,8 +158,11 @@ from .harness import (
     KnowledgeRuntimeResult,
     MemoryPackageRealization,
     MemoryProviderCapabilities,
+    MemoryRuntimeHandler,
+    MemoryRuntimeMethod,
     ModelProviderCapabilities,
     serve_knowledge_runtime_process,
+    serve_memory_runtime_process,
 )
 
 try:
