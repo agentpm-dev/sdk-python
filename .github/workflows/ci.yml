@@ -20,11 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-latest, python: '3.11'}
-          - {os: ubuntu-latest, python: '3.12'}
-          - {os: macos-latest, python: '3.11'}
-          - {os: macos-15-intel, python: '3.11'}
-          - {os: windows-latest, python: '3.11'}
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.11" }
+          - { os: macos-15-intel, python: "3.11" }
+          - { os: windows-latest, python: "3.11" }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -47,20 +47,30 @@ jobs:
         run: cargo build -p agentpm-cli
       - uses: astral-sh/setup-uv@v6
         with:
-          version: '0.13.5'
+          version: "0.13.5"
           python-version: ${{ matrix.python || '3.11' }}
           enable-cache: false
       - name: Select test executables and check shared fixtures
         shell: bash
         working-directory: sdk
+        env:
+          SDK_TEST_PYTHON_VERSION: ${{ matrix.python || '3.11' }}
         run: |
-          python - <<'PYCODE'
+          uv run --no-project --python "$SDK_TEST_PYTHON_VERSION" python - <<'PYCODE'
           import os, pathlib, platform, shutil, subprocess, sys
-          print('Native SDK host:', platform.system(), platform.machine(), sys.version.split()[0])
+          expected = os.environ['SDK_TEST_PYTHON_VERSION']
+          actual = f'{sys.version_info.major}.{sys.version_info.minor}'
+          if actual != expected:
+              raise SystemExit(f'Expected Python {expected} for SDK fixtures, got {actual}')
+          python = pathlib.Path(sys.executable).resolve()
+          child_version = subprocess.check_output([str(python), '-I', '-c', "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], text=True).strip()
+          if child_version != expected:
+              raise SystemExit(f'Fixture interpreter {python} reports {child_version}, expected {expected}')
+          print('Native SDK host:', platform.system(), platform.machine(), sys.version.split()[0], python)
           cli = pathlib.Path('../cli').resolve()
           binary = cli / 'target/debug' / ('agentpm.exe' if os.name == 'nt' else 'agentpm')
           with open(os.environ['GITHUB_ENV'], 'a') as out:
-              for name, value in {'AGENTPM': binary, 'AGENTPM_TEST_CLI': binary, 'AGENTPM_TEST_UV': shutil.which('uv'), 'AGENTPM_TEST_PYTHON': sys.executable, 'AGENTPM_PYTHON': sys.executable, 'AGENTPM_TELEMETRY': '0'}.items():
+              for name, value in {'AGENTPM': binary, 'AGENTPM_TEST_CLI': binary, 'AGENTPM_TEST_UV': shutil.which('uv'), 'AGENTPM_TEST_PYTHON': python, 'AGENTPM_PYTHON': python, 'AGENTPM_TELEMETRY': '0'}.items():
                   print(f'{name}={value}', file=out)
           subprocess.run([sys.executable, str(cli/'scripts/check_sdk_contract.py'), '--cli-root', str(cli), '--sdk-root', str(pathlib.Path.cwd())], check=True)
           PYCODE
