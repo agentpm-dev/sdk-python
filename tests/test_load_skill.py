@@ -174,7 +174,9 @@ def test_load_skill_loads_tool_backed_skill_and_resolved_tools(tmp_skill_workspa
         lockfile_override=str(lockfile_path),
     )
 
-    assert ".agentpm/skills" in loaded["entrypointPath"]
+    assert Path(loaded["entrypointPath"]) == (
+        skills_dir / "@zack" / "triage-playbook" / "0.1.0" / "SKILL.md"
+    )
     assert "Use the checklist." in loaded["entrypointContent"]
     assert loaded["resolvedTools"] == [
         {

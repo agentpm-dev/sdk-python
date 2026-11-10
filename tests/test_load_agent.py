@@ -434,7 +434,7 @@ def test_load_agent_loads_installed_agent_and_resolved_tools_and_skills(
 
     assert loaded["manifest"]["kind"] == "agent"
     assert loaded["manifest"]["name"] == "support-agent"
-    assert ".agentpm/agents" in loaded["root"]
+    assert Path(loaded["root"]) == agents_dir / "@zack" / "support-agent" / "0.1.0"
     assert loaded["resolvedTools"] == [
         {
             "packageKey": "tool:@zack/capitalize@0.1.0",
