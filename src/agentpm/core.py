@@ -1,31 +1,20 @@
 from __future__ import annotations
 
-import codecs
-import contextlib
 import json
 import os
-import queue
 import re
-import resource
-import shutil
-import signal
-import subprocess
 import sys
-import tempfile
-import threading
-import time
-from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, NoReturn, cast, overload
 
 from semver import VersionInfo
 from semver import match as semver_match
 
+from ._cli import invoke
 from .types import (
     AgentMeta,
     DependencyReference,
-    Entrypoint,
     JsonValue,
     KnowledgeMeta,
     LoadedAgent,
@@ -53,18 +42,12 @@ from .types import (
     ResolvedAgentProfileRef,
     ResolvedAgentSkillRef,
     ResolvedAgentToolRef,
-    Runtime,
     SkillMeta,
     ToolFunc,
     ToolMeta,
 )
 
-READ_CHUNK = 65536
-MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap across stdout+stderr
-GRACE_AFTER_JSON = 0.40  # seconds to let the child exit after JSON seen
-
 DEFAULT_TIMEOUT = 120.0
-_ALLOWED = {"node", "nodejs", "python", "python3"}
 
 
 def _debug_enabled() -> bool:
@@ -75,96 +58,6 @@ def _debug_enabled() -> bool:
 def _dprint(msg: str) -> None:
     if _debug_enabled():
         sys.stderr.write(f"[agentpm-debug] {msg}\n")
-
-
-def _abbrev(s: str, n: int = 240) -> str:
-    return s if len(s) <= n else (s[:n] + "…")
-
-
-def _merge_env(
-    entry_env: dict[str, str] | None,
-    caller_env: dict[str, str] | None,
-) -> dict[str, str]:
-    merged = os.environ.copy()
-    if entry_env:
-        merged.update(entry_env)
-    if caller_env:
-        merged.update(caller_env)
-    return merged
-
-
-def _canonical(cmd: str) -> str:
-    # handle absolute paths and Windows extensions
-    base = os.path.basename(cmd).lower()
-    for ext in (".exe", ".cmd", ".bat"):
-        if base.endswith(ext):
-            return base[: -len(ext)]
-    return base
-
-
-def _interpreter_family(cmd: str) -> str | None:
-    base = os.path.basename(cmd).lower()
-    if base in ("node", "nodejs"):
-        return "node"
-    if base.startswith("python"):
-        return "python"
-    return None  # absolute paths still get matched by basename
-
-
-def _resolve_interpreter_command(
-    cmd: str,
-    entry_env: dict[str, str] | None,
-    caller_env: dict[str, str] | None,
-    runtime_type: str | None,
-) -> str:
-    merged = _merge_env(entry_env, caller_env)
-
-    # Prefer inferring from the command; fall back to runtime hint if needed
-    inferred = _interpreter_family(cmd)
-    hint = runtime_type if runtime_type == "node" or runtime_type == "python" else None
-    family = inferred or hint or None
-
-    if family == "node" and merged.get("AGENTPM_NODE"):
-        _dprint(f'override interpreter (node): "{cmd}" -> "{merged["AGENTPM_NODE"]}"')
-        return merged["AGENTPM_NODE"]
-    if family == "python" and merged.get("AGENTPM_PYTHON"):
-        _dprint(f'override interpreter (python): "{cmd}" -> "{merged["AGENTPM_PYTHON"]}"')
-        return merged["AGENTPM_PYTHON"]
-    return cmd
-
-
-def _assert_allowed_interpreter(cmd: str) -> None:
-    canon = _canonical(cmd)
-    if canon not in _ALLOWED and not canon.startswith("python3"):
-        raise ValueError(
-            f'Unsupported agent.json.entrypoint.command "{cmd}". Allowed: node|nodejs|python|python3'
-        )
-
-
-# verify the interpreter exists on PATH
-def _assert_interpreter_available(
-    cmd: str, entry_env: dict[str, str] | None, caller_env: dict[str, str] | None
-) -> None:
-    merged = _merge_env(entry_env, caller_env)
-
-    which = shutil.which(cmd, path=merged.get("PATH", ""))
-    _dprint(f'interpreter="{cmd}" which={which or "<not found>"}')
-    _dprint(f'MERGED PATH={_abbrev(merged.get("PATH",""))}')
-
-    if which is None:
-        raise FileNotFoundError(
-            f'Interpreter "{cmd}" not found on PATH.\nChecked PATH={merged.get("PATH","")}'
-        )
-
-
-def _assert_interpreter_matches_runtime(cmd: str, runtime: Runtime) -> None:
-    canon = _canonical(cmd)
-    runtime_interpreter = _canonical(runtime["type"])
-
-    if not is_interpreter_match(runtime_interpreter, canon):
-        raise ValueError(
-            f'Misconfigured tool - agent.json.entrypoint.command "{cmd}" does not match tool runtime {runtime_interpreter}'
-        )
 
 
 def is_interpreter_match(runtime: str, command: str) -> bool:
@@ -233,6 +126,11 @@ def _find_installed(base: Path, name: str, version: str) -> tuple[Path, Path] | 
         root = Path(name_dir) / version
         manifest = root / "agent.json"
         if manifest.exists():
+            installed = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(installed, dict) or installed.get("version") != version:
+                raise ValueError(
+                    "Installed package version mismatch; run agentpm install again on this machine"
+                )
             return root, manifest
     return None
 
@@ -245,7 +143,7 @@ def find_project_root(start_dir: str | Path) -> Path:
     """
     dir_path = Path(start_dir).resolve()
     while True:
-        if (dir_path / "agent.json").exists():
+        if (dir_path / "agent.json").exists() or (dir_path / "agent.lock").exists():
             return dir_path
         if (dir_path / "pyproject.toml").exists():
             return dir_path
@@ -836,16 +734,72 @@ def _read_loop_manifest(p: Path) -> LoopMeta:
     return manifest
 
 
-# Historical name: this helper now accepts modern agent.lock shapes v2 and v3.
-# Keep the narrower name for now to avoid internal churn while Skills remain the
-# only v3-specific addition on top of the same overall lock envelope.
+# Keep the historical helper name; all modern supported versions share these maps.
 def _read_lockfile_v2(lockfile_path: Path) -> dict[str, Any]:
-    lock = cast(dict[str, Any], json.loads(lockfile_path.read_text(encoding="utf-8")))
-    if lock.get("lockfile_version") not in (2, 3):
+    try:
+        lock = json.loads(lockfile_path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError) as error:
         raise ValueError(
-            f'Unsupported lockfile version at {lockfile_path}; expected agent.lock v2 or v3. Run "agentpm install" to regenerate the lockfile.'
+            f"Malformed agent.lock at {lockfile_path}; run agentpm install to repair it"
+        ) from error
+    if (
+        not isinstance(lock, dict)
+        or type(lock.get("lockfile_version")) is not int
+        or lock["lockfile_version"] not in (2, 3, 4)
+    ):
+        raise ValueError(
+            f"Unsupported lockfile version at {lockfile_path}; expected agent.lock v2, v3 or v4. Update AgentPM CLI/SDK and run agentpm install."
         )
-    return lock
+
+    def malformed() -> NoReturn:
+        raise ValueError(
+            f"Malformed agent.lock at {lockfile_path}; run agentpm install to repair it"
+        )
+
+    packages, roots = lock.get("packages"), lock.get("roots")
+    if not isinstance(packages, dict) or not isinstance(roots, dict):
+        malformed()
+    for key, package in packages.items():
+        if not isinstance(package, dict) or any(
+            not isinstance(package.get(field), str) or not package[field]
+            for field in ("kind", "name", "version", "integrity")
+        ):
+            malformed()
+        if key != f"{package['kind']}:{package['name']}@{package['version']}":
+            malformed()
+        if package.get("python_resolution") is not None and not isinstance(
+            package["python_resolution"], dict
+        ):
+            malformed()
+    kinds = {
+        "tools": "tool",
+        "skills": "skill",
+        "knowledge": "knowledge",
+        "memory": "memory",
+        "profiles": "profile",
+    }
+    for root in roots.values():
+        if not isinstance(root, dict):
+            malformed()
+        for field, kind in kinds.items():
+            refs = root.get(field, [])
+            if not isinstance(refs, list) or any(
+                not isinstance(ref, str) or ref not in packages or packages[ref]["kind"] != kind
+                for ref in refs
+            ):
+                malformed()
+        if root.get("loop") is not None:
+            ref = root["loop"]
+            if not isinstance(ref, str) or ref not in packages or packages[ref]["kind"] != "loop":
+                malformed()
+        reserved = root.get("reserved", {})
+        if not isinstance(reserved, dict) or any(
+            not isinstance(reserved[field], list)
+            for field in ("skills", "knowledge", "memory", "profiles")
+            if field in reserved
+        ):
+            malformed()
+    return cast(dict[str, Any], lock)
 
 
 def _resolve_agent_lockfile_path(lockfile_override: str | None) -> Path:
@@ -1183,343 +1137,6 @@ def _resolve_loop_installed_path(
     return None
 
 
-def _build_env(
-    entry_env: dict[str, str], caller_env: dict[str, str], home: str, tmpdir: str
-) -> dict[str, str]:
-    base = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": home,
-        "TMPDIR": tmpdir,
-    }
-    # Optional: preserve locale if present
-    for k in ("LANG", "LC_ALL"):
-        if k in os.environ:
-            base[k] = os.environ[k]
-    # Agent-provided env wins, then caller overrides
-    return {**base, **entry_env, **caller_env}
-
-
-def _preexec_rlimits_for(
-    cmd: str,
-    *,
-    max_cpu_s: int | None = 10,
-    max_files: int | None = 512,
-    max_addr_mb: int | None = 512,
-) -> Callable[[], None]:
-    """
-    Apply rlimits safely per interpreter.
-
-    - Node (node/nodejs): SKIP RLIMIT_AS by default (V8 JIT/WASM need large VA space).
-      You can force a value with env AGENTPM_RLIMIT_AS_MB.
-    - Python: keep modest RLIMIT_AS if you want.
-    """
-    import os
-    import resource  # type: ignore
-
-    IS_DARWIN = os.uname().sysname == "Darwin"
-    fam = _canonical(cmd)
-    is_node = fam in ("node", "nodejs")
-
-    # Optional global override
-    env_override = os.getenv("AGENTPM_RLIMIT_AS_MB")
-    addr_mb = max_addr_mb
-    if env_override:
-        with suppress(ValueError):
-            parsed = int(env_override)
-            if parsed > 0:
-                addr_mb = parsed
-
-    # Default: do NOT cap address space for Node
-    if is_node and env_override is None:
-        addr_mb = None
-
-    _dprint(
-        f"rlimits: cmd={cmd} RLIMIT_AS={'off' if is_node and env_override is None else addr_mb}MB"
-    )
-
-    def _fn() -> None:
-        if max_cpu_s is not None and hasattr(resource, "RLIMIT_CPU"):
-            resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_s, max_cpu_s))
-        if max_files is not None and hasattr(resource, "RLIMIT_NOFILE"):
-            resource.setrlimit(resource.RLIMIT_NOFILE, (max_files, max_files))
-        if addr_mb is not None and not IS_DARWIN and hasattr(resource, "RLIMIT_AS"):
-            limit = addr_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-
-    return _fn
-
-
-def _spawn_once(
-    root: Path, entry: Entrypoint, payload: JsonValue, timeout_s: float, env: dict[str, str]
-) -> JsonValue:
-    """
-    Cross-platform:
-      - Spawns child, writes JSON payload, closes stdin.
-      - Reads stdout/stderr in background threads (binary), decodes incrementally.
-      - Detects first complete JSON object in stdout.
-      - After JSON is seen, gives a small grace window, then terminates/kills if needed.
-      - Enforces timeout and 10MB total output cap.
-    Returns: (parsed_json, full_stdout_text, full_stderr_text)
-    Raises: TimeoutError or RuntimeError on failures.
-    """
-    # 1) Tool working dir (what the tool expects for relative paths)
-    tool_cwd = (root / entry.get("cwd", ".")).resolve()
-
-    # 2) Isolated run dirs for HOME/TMPDIR
-    run_root: Path = tool_cwd / "run"
-    run_root.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="run-", dir=str(run_root)))
-    home = str(work / "home")
-    Path(home).mkdir(parents=True, exist_ok=True)
-    tmpd = str(work / "tmp")
-    Path(tmpd).mkdir(parents=True, exist_ok=True)
-
-    # 3) Clean env
-    env = _build_env(entry.get("env", {}), env, home, tmpd)
-
-    # 4) Command + hardening flags
-    cmd = [entry["command"], *entry.get("args", [])]
-    if _canonical(entry["command"]).startswith("python"):
-        if "-I" not in cmd:
-            cmd.insert(1, "-I")
-        if "-B" not in cmd:
-            cmd.insert(1, "-B")
-    elif _canonical(entry["command"]).startswith("node"):
-        old_space = int(os.getenv("AGENTPM_NODE_OLD_SPACE_MB", "256"))
-
-        if not any(a.startswith("--max-old-space-size") for a in cmd[1:]):
-            cmd.insert(1, f"--max-old-space-size={old_space}")
-
-        want_jitless = (
-            any(a == "--jitless" for a in cmd[1:])
-            or "--jitless" in (env or {}).get("NODE_OPTIONS", "")
-            or os.getenv("AGENTPM_NODE_JITLESS", "").lower() in ("1", "true", "yes")
-        )
-        if want_jitless and "--jitless" not in cmd[1:]:
-            cmd.insert(1, "--jitless")
-
-    # Add -u for Python children (unbuffered); safe no-op for non-Python
-    # insert after interpreter
-    if cmd and os.path.basename(cmd[0]).lower().startswith("python") and "-u" not in cmd:
-        cmd = [cmd[0], "-u", *cmd[1:]]
-
-    _dprint(f"launch: argv={cmd}")
-    _dprint(f"cwd={tool_cwd}")
-    # _dprint(f"env={env}")
-
-    # 5) Spawn (cwd = tool_cwd)
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(tool_cwd),
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,  # binary pipes
-        bufsize=0,
-        start_new_session=(os.name == "posix"),
-        preexec_fn=(
-            _preexec_rlimits_for(entry["command"]) if hasattr(resource, "setrlimit") else None
-        ),
-        close_fds=True,
-    )
-
-    assert proc.stdout and proc.stderr
-
-    with contextlib.suppress(Exception):
-        data = json.dumps(payload).encode("utf-8")
-        assert proc.stdin is not None
-        proc.stdin.write(data)
-        proc.stdin.flush()
-        proc.stdin.close()
-
-    # Queues for bytes
-    q_out: queue.Queue[bytes | None] = queue.Queue()
-    q_err: queue.Queue[bytes | None] = queue.Queue()
-
-    def reader(src, q: queue.Queue[bytes | None]):
-        try:
-            while True:
-                b = src.read(READ_CHUNK)
-                if not b:
-                    break
-                q.put(b)
-        finally:
-            q.put(None)
-
-    t_out = threading.Thread(target=reader, args=(proc.stdout, q_out), daemon=True)
-    t_err = threading.Thread(target=reader, args=(proc.stderr, q_err), daemon=True)
-    t_out.start()
-    t_err.start()
-
-    # Incremental decoders
-    dec_out = codecs.getincrementaldecoder("utf-8")()
-    dec_err = codecs.getincrementaldecoder("utf-8")()
-
-    out_parts: list[str] = []
-    err_parts: list[str] = []
-    total_bytes = 0
-
-    parsed: dict[str, Any] | None = None
-    got_json_at: float | None = None
-    sent_term = sent_kill = False
-    deadline = time.monotonic() + timeout_s
-
-    # Main loop: drain queues, detect JSON, apply grace-and-kill
-    while True:
-        now = time.monotonic()
-        if now > deadline:
-            _kill_proc(proc, signal.SIGKILL)
-            raise TimeoutError(f"Tool timed out after {timeout_s:.1f}s")
-
-        drained = False
-
-        # Drain stdout queue
-        while True:
-            try:
-                b = q_out.get_nowait()
-            except queue.Empty:
-                break
-
-            drained = True
-            if b is None:
-                # EOF marker for stdout
-                pass
-            else:
-                total_bytes += len(b)
-                if total_bytes > MAX_BYTES:
-                    _kill_proc(proc, signal.SIGKILL)
-                    raise RuntimeError("Tool produced too much output; 10MB limit")
-                chunk = dec_out.decode(b)
-                out_parts.append(chunk)
-                if parsed is None:
-                    obj, _slice, _s, _e = _try_extract_json("".join(out_parts))
-                    if obj is not None:
-                        parsed = obj
-                        got_json_at = time.monotonic()
-
-            q_out.task_done()
-
-        # Drain stderr queue
-        while True:
-            try:
-                b = q_err.get_nowait()
-            except queue.Empty:
-                break
-            drained = True
-            if b is None:
-                pass
-            else:
-                total_bytes += len(b)
-                if total_bytes > MAX_BYTES:
-                    _kill_proc(proc, signal.SIGKILL)
-                    raise RuntimeError("Tool produced too much output; 10MB limit")
-                err_parts.append(dec_err.decode(b))
-            q_err.task_done()
-
-        # If we've seen JSON, give a grace window, then TERM→KILL if still alive
-        if parsed is not None and got_json_at is not None and proc.poll() is None:
-            if (now - got_json_at) > GRACE_AFTER_JSON and not sent_term:
-                _kill_proc(proc, signal.SIGTERM)
-                sent_term = True
-                term_at = now
-            elif sent_term and not sent_kill and (now - term_at) > 0.15:
-                _kill_proc(proc, signal.SIGKILL)
-                sent_kill = True
-
-        # Break when child is gone and both reader threads have delivered EOF
-        if proc.poll() is not None and not t_out.is_alive() and not t_err.is_alive():
-            break
-
-        if not drained:
-            time.sleep(0.02)  # avoid busy loop
-
-    # Flush decoders
-    out_parts.append(dec_out.decode(b"", final=True))
-    err_parts.append(dec_err.decode(b"", final=True))
-    stdout_text = "".join(out_parts)
-    stderr_text = "".join(err_parts)
-
-    runner_forced_exit = sent_term or sent_kill
-
-    # Decide outcome
-    if parsed is None and proc.returncode == 0:
-        # Exit 0 but no JSON → parse failure
-        # keep run dir for inspection
-        try:
-            (work / "child.stdout").write_text(stdout_text or "", encoding="utf-8")
-            (work / "child.stderr").write_text(stderr_text or "", encoding="utf-8")
-        except Exception:
-            pass
-        _dprint(f"[agentpm] child logs saved in: {work}")
-
-        raise RuntimeError(
-            f"Failed to parse tool JSON output.\n Stderr:\n{stderr_text}\nStdout:\n{stdout_text}"
-        )
-
-    if proc.returncode != 0 and not runner_forced_exit:
-        # Child failed on its own → persist logs and raise
-        try:
-            (work / "child.stdout").write_text(stdout_text or "", encoding="utf-8")
-            (work / "child.stderr").write_text(stderr_text or "", encoding="utf-8")
-        except Exception:
-            pass
-        _dprint(f"[agentpm] child logs saved in: {work}")
-
-        # Child failed on its own → raise
-        tail = stderr_text[-4000:] if stderr_text else ""
-        raise RuntimeError(f"Tool exited with code {proc.returncode}. Stderr (tail):\n{tail}")
-
-    if parsed is None:
-        # Shouldn't happen if runner forced exit; guard anyway
-        raise RuntimeError(
-            f"Tool did not produce valid JSON.\n Stderr:\n{stderr_text}\nStdout:\n{stdout_text}"
-        )
-
-    # Success: cleanup and return parsed JSON
-    shutil.rmtree(work, ignore_errors=True)
-    return parsed
-
-
-def _kill_proc(proc: subprocess.Popen, sig: int) -> None:
-    try:
-        if os.name == "posix":
-            # send to process group (we started a new session)
-            os.killpg(proc.pid, sig)
-        else:
-            # Windows: use terminate/kill equivalents
-            proc.terminate() if sig == signal.SIGTERM else proc.kill()
-    except Exception:
-        pass
-
-
-def _try_extract_json(buf: str) -> tuple[Any, str | None, int | None, int | None]:
-    """
-    Heuristic: find the first complete top-level JSON object in `buf`
-    using brace depth. Returns (obj, slice_text, start_idx, end_idx) or
-    (None, None, None, None) if not found / not parseable yet.
-    """
-    depth = 0
-    start = None
-    for i, ch in enumerate(buf):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    s = buf[start : i + 1]
-                    try:
-                        return json.loads(s), s, start, i + 1
-                    except Exception:
-                        # keep scanning; may be partial/invalid JSON fragment
-                        pass
-    return None, None, None, None
-
-
-# --- Overloads (type-only) ---
 @overload
 def load(
     spec: str,
@@ -1646,56 +1263,28 @@ def load(
             raise err from None
     m = _read_manifest(manifest_path)
 
-    env = env or {}
-
-    # enforce interpreter whitelist and available
+    caller_env = dict(env or {})
     ep = m["entrypoint"]
-
-    _dprint(f"resolved root={root}")
-    _dprint(f"manifest={manifest_path}")
-    _dprint(f'entry.command="{ep["command"]}" args={ep.get("args", [])}')
-
-    # enforce expected/required environment
-    expected_env = m.get("environment") or {}
-    vars_obj = expected_env.get("vars", {}) if expected_env else {}
-    has_vars = bool(vars_obj) and isinstance(vars_obj, dict) and bool(list(vars_obj.values()))
-    if has_vars:
-        _dprint(f"tool-defined environment={expected_env}")
-
-        for k, v in vars_obj.items():
-            default_val: str | None = v.get("default")
-
-            if v.get("required") and not v.get("default") and k not in env:
-                raise ValueError(
-                    f"Missing environment variable: {k}. {k} is required and has no default value."
-                )
-            elif default_val is not None and k not in env:
-                # Set the default value
-                env[k] = default_val
-
-    runtime = m.get("runtime") or {}
-    rt = runtime.get("type")
-    runtime_type: str | None = rt if rt in ("node", "python") else None
-    resolved_cmd = _resolve_interpreter_command(ep["command"], ep.get("env", {}), env, runtime_type)
-
-    # enforce interpreter whitelist and available
-    _assert_allowed_interpreter(resolved_cmd)
-    _assert_interpreter_available(resolved_cmd, ep.get("env", {}), env)
-
-    # enforce interpreter and runtime compatability
-    if "runtime" in m and "type" in m["runtime"]:
-        _assert_interpreter_matches_runtime(resolved_cmd, m["runtime"])
-
-    t_s = (
+    effective = {**os.environ, **ep.get("env", {}), **caller_env}
+    for key, declaration in (m.get("environment") or {}).get("vars", {}).items():
+        default = declaration.get("default")
+        if key not in effective and default is not None:
+            caller_env[key] = default
+            effective[key] = default
+        if declaration.get("required") and key not in effective:
+            raise ValueError(
+                f"Missing environment variable: {key}. {key} is required and has no default value."
+            )
+    timeout_s = (
         timeout
         if timeout is not None
-        else float(ep.get("timeout_ms") or (DEFAULT_TIMEOUT * 1000)) / 1000.0
+        else float(ep.get("timeout_ms") or DEFAULT_TIMEOUT * 1000) / 1000
     )
-
-    entry_for_spawn = ep | {"command": resolved_cmd}
+    project = find_project_root(Path.cwd())
+    exact_spec = f"{spec[:spec.rfind('@')]}@{m['version']}"
 
     def func(input: JsonValue) -> JsonValue:
-        return _spawn_once(root, entry_for_spawn, input, t_s, env)
+        return invoke(project, root, exact_spec, input, timeout_s, caller_env, ep.get("env", {}))
 
     if with_meta:
         name = m["name"]

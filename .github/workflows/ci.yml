@@ -1,61 +1,88 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
-
+  workflow_dispatch:
+    inputs:
+      cli_ref:
+        description: Compatible CLI ref (>=0.1.43); use the proposed ref before CLI main is updated
+        default: main
+        type: string
+permissions:
+  contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   test-lint-build:
-    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
-
+        include:
+          - {os: ubuntu-latest, python: '3.11'}
+          - {os: ubuntu-latest, python: '3.12'}
+          - {os: macos-latest, python: '3.11'}
+          - {os: macos-15-intel, python: '3.11'}
+          - {os: windows-latest, python: '3.11'}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: sdk
+        shell: bash
     steps:
-      - name: Checkout
+      - name: Checkout SDK
         uses: actions/checkout@v4
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v6
         with:
-          enable-cache: true
-          python-version: ${{ matrix.python-version }}
-
-      - name: Create venv
-        run: uv venv --python ${{ matrix.python-version }}
-
-      - name: Install project (dev + langchain extras)
-        run: uv pip install -e ".[dev,langchain]"
-
-      - name: Run pre-commit (ruff/black/mypy & misc hooks)
-        run: uv run pre-commit run --all-files --show-diff-on-failure
-
-      - name: Run tests
-        run: uv run pytest
-
-      - name: Build sdist & wheel
-        run: uv run python -m build
-
-      - name: Verify package metadata
-        run: uv run twine check dist/*
-
-      - name: Smoke test the wheel (import)
+          path: sdk
+      - name: Checkout compatible CLI contract and runner
+        uses: actions/checkout@v4
+        with:
+          repository: agentpm-dev/cli
+          ref: ${{ inputs.cli_ref || vars.AGENTPM_CLI_REF || 'main' }}
+          path: cli
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the authoritative CLI
+        working-directory: cli
+        run: cargo build -p agentpm-cli
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.5'
+          python-version: ${{ matrix.python || '3.11' }}
+          enable-cache: false
+      - name: Select test executables and check shared fixtures
+        shell: bash
+        working-directory: sdk
         run: |
-          uv venv .smoke-venv --seed
-          .smoke-venv/bin/python -m pip install dist/*.whl
-          .smoke-venv/bin/python - <<'PY'
-          import importlib.metadata
-          print("agentpm version:", importlib.metadata.version("agentpm"))
-          import agentpm  # noqa: F401
-          PY
-
-      - name: Upload dist artifacts
-        uses: actions/upload-artifact@v4
+          python - <<'PYCODE'
+          import os, pathlib, platform, shutil, subprocess, sys
+          print('Native SDK host:', platform.system(), platform.machine(), sys.version.split()[0])
+          cli = pathlib.Path('../cli').resolve()
+          binary = cli / 'target/debug' / ('agentpm.exe' if os.name == 'nt' else 'agentpm')
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              for name, value in {'AGENTPM': binary, 'AGENTPM_TEST_CLI': binary, 'AGENTPM_TEST_UV': shutil.which('uv'), 'AGENTPM_TEST_PYTHON': sys.executable, 'AGENTPM_PYTHON': sys.executable, 'AGENTPM_TELEMETRY': '0'}.items():
+                  print(f'{name}={value}', file=out)
+          subprocess.run([sys.executable, str(cli/'scripts/check_sdk_contract.py'), '--cli-root', str(cli), '--sdk-root', str(pathlib.Path.cwd())], check=True)
+          PYCODE
+      - name: Install SDK and optional adapter
+        run: uv sync --extra dev --extra langchain
+      - name: Format, lint and typecheck
+        run: |
+          uv run black --check src tests
+          uv run ruff check src tests
+          uv run mypy src
+      - name: Test, including native-dependency SDK invocation
+        run: uv run pytest
+      - name: Build and check distributions
+        run: |
+          uv run python -m build
+          uv run twine check dist/*
+      - name: Smoke the wheel without optional integrations
+        run: |
+          uv venv .smoke-venv
+          uv pip install --python .smoke-venv dist/*.whl
+          uv run --no-project --python .smoke-venv python -c "import agentpm; from agentpm import load, load_agent; assert callable(load)"
+      - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.python-version }}
-          path: dist/*
+          name: python-dist-${{ matrix.os }}-${{ matrix.python }}
+          path: sdk/dist/*
