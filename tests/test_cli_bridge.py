@@ -70,6 +70,8 @@ def test_public_callable_sends_exact_context_and_unwraps(
         "@fixture/tool@^0.1.0", with_meta=True, env={"LAYER": "caller", "MOCK_SECRET_TOKEN": secret}
     )
     before = (project / "agent.lock").read_bytes()
+    # Shared mock reads UTF-8 bytes even under a Windows text code page.
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
     payload = {"message": 'quotes " unicode 😀', "nested": [1, False]}
     assert loaded["func"](payload) == payload
     request = json.loads(mock_cli.read_text())
