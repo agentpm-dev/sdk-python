@@ -102,6 +102,10 @@ def test_harness_client_initializes_streams_events_runs_and_shuts_down(
     assert client.shutdown() == {"shutdown": True}
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Unix shebang-only fake executable; Tool bridge native tests run on Windows",
+)
 def test_harness_client_passes_installed_agent_refs_as_positional_selector(
     tmp_path: Path,
 ) -> None:

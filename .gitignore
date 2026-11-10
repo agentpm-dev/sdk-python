@@ -13,3 +13,6 @@ htmlcov/
 # project
 dist/
 .idea/
+
+# Local AgentPM installations, environments and run logs
+.agentpm/

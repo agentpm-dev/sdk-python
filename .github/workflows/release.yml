@@ -19,6 +19,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout compatible CLI
+        uses: actions/checkout@v4
+        with:
+          repository: agentpm-dev/cli
+          ref: main
+          path: .release-cli
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build CLI prerequisite
+        run: |
+          cargo build --manifest-path .release-cli/Cargo.toml -p agentpm-cli
+          echo "AGENTPM=$GITHUB_WORKSPACE/.release-cli/target/debug/agentpm" >> "$GITHUB_ENV"
+          python .release-cli/scripts/check_sdk_contract.py --cli-root .release-cli --sdk-root .
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
         with:

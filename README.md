@@ -1,6 +1,6 @@
 # AgentPM™ Python SDK
 
-A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, Memory, Profile, and Loop packages. It discovers tools installed by `agentpm install`, executes their entrypoints in a subprocess, and can also inspect installed agent manifests plus their resolved dependency refs.
+A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, Memory, Profile, and Loop packages. It discovers tools installed by `agentpm install`, delegates their execution to the installed AgentPM CLI, and can also inspect installed agent manifests plus their resolved dependency refs.
 
 - 🔎 **Discovers** tools in `.agentpm/tools` (project) and `~/.agentpm/tools` (user), with `AGENTPM_TOOL_DIR` override.
 - 📦 **Loads installed agents** from `.agentpm/agents` and exposes their resolved tool and skill refs from `agent.lock`.
@@ -9,13 +9,49 @@ A lean, typed Python SDK for **AgentPM** tools and installed agent, Knowledge, M
 - ♾️ **Loads installed Memory packages** from `.agentpm/memory` and exposes authored blueprint metadata, build metadata, contract indexes, and resolved contract paths.
 - 🎭 **Loads installed Profile packages** from `.agentpm/profiles` and exposes authored role, objective, and communication metadata.
 - 🔁 **Loads installed Loop packages** from `.agentpm/loops` and exposes authored phase, transition, and error-policy metadata.
-- 🚀 **Runs entrypoints** via `node` or `python` (whitelisted) and exchanges JSON over stdin/stdout.
+- 🚀 **Runs Tools** through `agentpm run --machine`, which owns Node/Python execution.
 - 🧩 **Metadata-aware**: `with_meta=True` returns `func + meta` (name, version, description, inputs, outputs).
 - 🧪 **Framework adapters (optional)**: e.g., a LangChain adapter you can use if installed.
 
 > Requires Python **3.10+**.
 
 ---
+
+## CLI and lock compatibility
+
+SDK **0.1.17+** requires **AgentPM CLI 0.1.43+** for every Tool call,
+including Node and older vendored Python Tools. Install the CLI separately and
+check `agentpm --version`. Set `AGENTPM` to an absolute CLI executable path when
+it is not on PATH; it is a single executable, not a shell command.
+
+The SDK reads `agent.lock` **v2, v3 and v4** without rewriting it. Unsupported
+future or malformed locks fail with update/install guidance. An installed Agent
+can be loaded from a project containing just `agent.lock` and `.agentpm`; no app
+`agent.json` is required. Exact locked references remain exact when other
+versions coexist. A local author Tool root is not an installed Agent.
+
+Calls follow **app → SDK → `agentpm run --machine` → Tool**. The SDK unwraps the
+CLI result and returns the Tool's original JSON data. A Tool's `ok: false` stays
+ordinary returned data; runner failures raise an exception. Interpreter, schema,
+target, installed-state, timeout and managed-environment checks belong to the
+CLI. They happen on invocation, so metadata loading itself needs no CLI or
+available Tool interpreter. The SDK retains bounded input/output transport and
+passes the requested timeout to the CLI. Ctrl-C is handled by the CLI's scoped
+child cleanup; SDK interruption also terminates its CLI child.
+
+Environment precedence is ambient values, defaults for missing variables,
+entrypoint env, then caller env. Required variables may come from any of these
+layers. Managed Python strips `PYTHONPATH` and `PYTHONHOME` after layering. Use
+`AGENTPM_PYTHON` to select a compatible base interpreter **before install**, not
+to bypass the managed environment. Caller options and credential values are not
+printed in SDK debug output; credential values are redacted from CLI diagnostics.
+Tool results are returned unchanged, so Tools must not return secrets themselves.
+
+Run `agentpm install` explicitly to provision dependencies. If runtime state is
+missing/stale, reinstall with the selected `AGENTPM_PYTHON`; use
+`agentpm install --refresh` to repair damaged packages. Calls never auto-install,
+resolve from an index, rewrite the lock or fall back to app/global Python.
+Older SDK versions do not become v4-compatible merely because CLI install passed.
 
 ## Installation
 
@@ -52,7 +88,7 @@ uv pip install -e ".[dev]"
 # sanity checks
 uv run ruff check .
 uv run black --check .
-uv run mypy
+uv run mypy src
 uv run pytest -q
 ```
 
@@ -501,7 +537,7 @@ load_memory("@zack/profile-memory@0.1.0", memory_dir_override="/path/to/memory")
 - Process must exit with **code 0** on success.
 
 **Interpreter whitelist:** `node`, `nodejs`, `python`, `python3`.
-The SDK validates the interpreter and checks it’s present on `PATH`.
+The CLI validates the interpreter at invocation and checks its runtime and installed environment.
 
 ---
 
@@ -512,7 +548,8 @@ The SDK validates the interpreter and checks it’s present on `PATH`.
 src/
   agentpm/
     __init__.py           # re-exports: load, load_agent, load_knowledge, load_memory, load_skill, to_langchain_tool (lazy)
-    core.py               # resolver/spawn/JSON plumbing
+    core.py               # read-only discovery and composition
+    _cli.py               # CLI machine transport
     types.py              # JsonValue, TypedDicts
     adapters/
       __init__.py
@@ -529,7 +566,7 @@ tests/
 ```bash
 uv run ruff check .
 uv run black --check .
-uv run mypy
+uv run mypy src
 uv run pytest -q
 
 # run hooks locally on all files
@@ -582,26 +619,31 @@ Why Docker?
 ### How to use it
 
 1. Copy the provided [Dockerfile](https://github.com/agentpm-dev/sdk-python/tree/main/examples/python-agent) into your repo.
-2. (Optional) Pre-install tools locally with agentpm install ... and commit or copy .agentpm/tools/ into the image, or run agentpm install at build time if your CLI is available in the image.
-3. Build & run:
+2. Install a compatible Linux AgentPM CLI in the image and check `agentpm --version`.
+   The linked Dockerfiles are app scaffolds; add the CLI executable for your
+   container architecture to the build context and copy it onto PATH.
+3. Copy the authored manifest/portable `agent.lock`, then run `agentpm install`
+   inside the image with its selected Python. Do not commit `.agentpm/` or copy
+   host-managed environments into a different platform/container.
+4. Build & run:
 
 ```bash
 docker build -t agent-app .
 docker run --rm -e OPENAI_API_KEY=$OPENAI_API_KEY agent-app
 ```
 
-4. For development, use the docker-compose.yml snippet to mount your source and pass env vars conveniently.
+5. For development, use the docker-compose.yml snippet to mount your source and pass env vars conveniently.
 
 ### Troubleshooting
 
-- Set `AGENTPM_DEBUG=1` to print the SDK’s project root, search paths, merged PATH, and resolved interpreters.
+- Set `AGENTPM_DEBUG=1` to print the SDK’s project root and package search paths. Environment values are not logged.
 - You can force interpreters via:
 ```ini
 AGENTPM_NODE=/usr/bin/node
 AGENTPM_PYTHON=/usr/local/bin/python3.11
 ```
 
-- Prefer absolute interpreters in agent.json.entrypoint.command for production (e.g., /usr/bin/node). The SDKs still enforce the Node/Python family.
+- Prefer absolute interpreters in agent.json.entrypoint.command for production (e.g., /usr/bin/node). The CLI enforces the Node/Python family and owns managed Python selection.
 
 ---
 
@@ -614,7 +656,7 @@ AGENTPM_PYTHON=/usr/local/bin/python3.11
   Only `node` / `python` are allowed (including `nodejs` / `python3`). Update `entrypoint.command`.
 
 - **`Interpreter "... " not found on PATH`**
-  Install the interpreter or adjust `entrypoint.command`. The SDK runs `<command> --version` to verify availability.
+  Install the interpreter or adjust `entrypoint.command`. The CLI checks interpreter availability at invocation.
 
 - **PEP 668 / “externally managed”**
   Use a venv (we recommend `uv venv`) and install with `uv pip install -e ".[dev]"`.
@@ -627,3 +669,21 @@ AGENTPM_PYTHON=/usr/local/bin/python3.11
 ## License
 
 MIT — see `LICENSE`.
+
+## Contributor verification
+
+Build CLI 0.1.43+ from the matching CLI revision, then set `AGENTPM` and
+`AGENTPM_TEST_CLI` to that executable. Set `AGENTPM_TEST_UV` to the verified
+pinned uv 0.13.5 binary and `AGENTPM_TEST_PYTHON` to a Python 3.11+ executable
+to include the no-model native dependency test. The local Registry fixture
+serves test archives only; uv verifies the checked-in pydantic resolution's
+wheels. No publication or real Registry credentials are needed. Without these
+test variables the explicitly marked native integration is skipped.
+
+CI runs the suites and native integration on Linux x64, both macOS architectures
+and Windows x64. It compares the byte-identical `fixtures/sdk-v1` snapshots with
+`agentpm-dev/cli`'s `crates/agentpm-sdk/contracts/sdk-v1`. Before CLI main contains the compatible
+bridge, dispatch CI with `cli_ref` or set repository variable `AGENTPM_CLI_REF`
+to the proposed CLI ref. Release workflows always use CLI main; merge the CLI
+prerequisite before publishing SDK tags. Hosted passes and published-package
+consumer smokes are separate from local source/build checks.

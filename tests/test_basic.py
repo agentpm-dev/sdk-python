@@ -87,7 +87,7 @@ sys.stdout.write(json.dumps(out))
                 if with_env
                 else None
             ),
-            "runtime": {"type": "python", "version": "20"},
+            "runtime": {"type": "python", "version": "3.10"},
             "kind": "tool",
         }
         (root / "agent.json").write_text(json.dumps(agent_json, indent=2), encoding="utf-8")
@@ -282,6 +282,11 @@ def tmp_tools_dir() -> Iterator[Path]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def isolated_run_project(tmp_tools_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_tools_dir)
+
+
 def test_loads_and_invokes_entrypoint(tmp_tools_dir: Path) -> None:
     # def shell_full_path() -> str:
     #     cmds = [
@@ -320,8 +325,8 @@ def test_unsupported_entrypoint_command_rejected(tmp_tools_dir: Path) -> None:
     )  # command not allowed
 
     with pytest.raises(Exception) as ei:
-        load(bash_spec, tool_dir_override=str(tmp_tools_dir))
-    assert "nsupported agent.json.entrypoint.command" in str(ei.value)
+        load(bash_spec, tool_dir_override=str(tmp_tools_dir))({"text": "test"})
+    assert "unsupported entrypoint.command" in str(ei.value)
 
 
 def test_with_meta_returns_func_and_meta(tmp_tools_dir: Path) -> None:
@@ -409,7 +414,7 @@ def test_nonzero_exit_raises(tmp_tools_dir: Path) -> None:
     failing = load(fail_spec, tool_dir_override=str(tmp_tools_dir))
     with pytest.raises(Exception) as ei:
         failing({})
-    assert "exited with code 2" in str(ei.value)
+    assert "exited unsuccessfully: 2" in str(ei.value)
 
 
 def test_missing_env_variables_raises(tmp_tools_dir: Path) -> None:
@@ -596,3 +601,27 @@ def test_load_rejects_installed_loop_specs(tmp_tools_dir: Path) -> None:
         import os
 
         os.environ.pop("AGENTPM_LOOP_DIR", None)
+
+
+def test_legacy_vendored_python_uses_cli(tmp_tools_dir: Path) -> None:
+    spec = "@zack/vendored@1.0.0"
+    root = tmp_tools_dir / "@zack/vendored/1.0.0"
+    (root / "_vendor").mkdir(parents=True)
+    (root / "_vendor/dep.py").write_text('VALUE="vendored"')
+    (root / "tool.py").write_text(
+        'import sys,json\nsys.path.insert(0,"_vendor")\nfrom dep import VALUE\njson.load(sys.stdin)\nprint(json.dumps({"value":VALUE}))'
+    )
+    (root / "agent.json").write_text(
+        json.dumps(
+            {
+                "kind": "tool",
+                "name": "vendored",
+                "version": "1.0.0",
+                "runtime": {"type": "python", "version": "3.10"},
+                "entrypoint": {"command": "python", "args": ["tool.py"]},
+                "inputs": {"type": "object"},
+                "outputs": {"type": "object"},
+            }
+        )
+    )
+    assert load(spec, tool_dir_override=str(tmp_tools_dir))({}) == {"value": "vendored"}
