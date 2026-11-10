@@ -1,17 +1,13 @@
-version: "3.9"
 services:
   agent:
-    build: ..
+    platform: linux/amd64
+    build: .
     image: agent-app:latest
     environment:
-      # Turn on verbose SDK diagnostics if needed
       AGENTPM_DEBUG: "1"
-      # Example tool secrets (set real values in your env or compose overrides)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # Optional interpreter overrides (usually not needed in this image)
-      # AGENTPM_NODE: /usr/bin/node
-      # AGENTPM_PYTHON: /usr/local/bin/python3.11
-    # For local dev, mount your app so edits live-reload (if your app supports it)
-    volumes:
-      - ./:/app
+      # Optional interpreter overrides must match the image's install step.
+      # AGENTPM_PYTHON: /usr/local/bin/python3.13
+    # Add source-only bind mounts for development if needed. A whole /app mount
+    # would hide the image's managed .agentpm install or expose host runtime state.
     command: ["python", "run.py"]

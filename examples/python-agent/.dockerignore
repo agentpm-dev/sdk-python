@@ -1,0 +1,9 @@
+.agentpm
+.agentpm-state
+.venv
+node_modules
+.git
+.env
+.env.*
+__pycache__
+*.pyc

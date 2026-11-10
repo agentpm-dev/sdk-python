@@ -58,21 +58,25 @@ Older SDK versions do not become v4-compatible merely because CLI install passed
 ### From PyPI (recommended)
 
 Using **uv**:
+
 ```bash
 uv pip install agentpm
 ```
 
 Or with standard pip:
+
 ```bash
 python -m pip install agentpm
 ```
 
 If you'll use the optional LangChain adapter:
+
 ```bash
 uv pip install 'agentpm[langchain]'
 # or
 python -m pip install 'agentpm[langchain]'
 ```
+
 ---
 
 ## Quick Start (with `uv`)
@@ -109,6 +113,7 @@ print(result["summary"])
 ```
 
 ### With metadata (build richer tool descriptions)
+
 ```python
 from agentpm import load
 
@@ -226,7 +231,7 @@ print(result)
 
 The convenience Hook helpers use contract-specific type hints. `on_before_model_request` may return `context_sections` and `provider_options`, `on_before_tool_selection` may return `candidate_ids`, `on_before_tool_call` may return replacement `arguments`, `on_before_knowledge_request` may shape the same package request options, and `on_after_knowledge_retrieval` may filter/reorder existing results or transform model-visible text while retaining result identity. Direct Memory hook helpers can shape authorized read requests or patch/reject authorized write content before runtime dispatch. A returned object must include `decision: "continue"` or `decision: "reject"`; returning `None` is treated as an explicit continue with no patch. There is no embedding Hook ID; use `register_embedding_provider` to host query embedding.
 
-Host capability advertisement is role-specific. `register_model_provider` automatically advertises the registry ID as `provider` plus semantic-action, structured-output, multimodal-input, and usage-reporting flags; pass model-specific overrides such as `model` or `context_window_tokens` when known. `register_embedding_provider` registers the Milestone 12 `embed` contract and advertises supported embedding spaces. `register_knowledge_runtime` registers the Milestone 12 `retrieve` contract and advertises supported modes/features/package attestations. `register_host_provider` remains available for lower-level role-specific capability shapes. `on_approval` advertises approval support and optional cancellation support. After initialization, `host_service_registration(role, registry_id)` exposes the Harness registration result, including `active: false` and a reason when Harness rejects a registration.
+Host capability advertisement is role-specific. `register_model_provider` automatically advertises the registry ID as `provider` plus semantic-action, structured-output, multimodal-input, and usage-reporting flags; pass model-specific overrides such as `model` or `context_window_tokens` when known. `register_embedding_provider` registers the `embed` provider contract and advertises supported embedding spaces. `register_knowledge_runtime` registers the `retrieve` runtime contract and advertises supported modes/features/package attestations. `register_host_provider` remains available for lower-level role-specific capability shapes. `on_approval` advertises approval support and optional cancellation support. After initialization, `host_service_registration(role, registry_id)` exposes the Harness registration result, including `active: false` and a reason when Harness rejects a registration.
 
 Host model providers receive the canonical `ModelRequest`. Use `request["prompt"]` as the system/control/context material and serialize `request["ordered_turns"]` as ordered provider turns: `user_input` as a user message, `assistant_content` as an assistant message, `semantic_action_call` as the provider's native tool/function call when `provider_call_id` and `provider_alias` are present, `semantic_action_result` as the correlated native tool/function result using the same `provider_call_id`, and `repair_feedback` as one model-visible user turn. Do not also flatten the Section 6 transcript or run input into a duplicate prompt message when ordered turns are serialized.
 
@@ -363,6 +368,7 @@ load("@zack/incident-response-loop@0.3.0")
 ```
 
 ### Optional: LangChain adapter
+
 The adapter is lazy-imported and only needed if you call it.
 
 ```python
@@ -505,6 +511,7 @@ load_memory("@zack/profile-memory@0.1.0", memory_dir_override="/path/to/memory")
 ## Manifest & Runtime Contract
 
 **`agent.json` (minimal fields used by the SDK):**
+
 ```json
 {
   "name": "@zack/summarize",
@@ -531,6 +538,7 @@ load_memory("@zack/profile-memory@0.1.0", memory_dir_override="/path/to/memory")
 ```
 
 **Execution contract:**
+
 - SDK writes **inputs JSON** to the process **stdin**.
 - Tool writes a single **outputs JSON** object to **stdout**.
 - Non-JSON logs should go to **stderr**.
@@ -544,6 +552,7 @@ The CLI validates the interpreter at invocation and checks its runtime and insta
 ## Development
 
 ### Project layout
+
 ```
 src/
   agentpm/
@@ -563,6 +572,7 @@ tests/
 ```
 
 ### Common tasks (via `uv`)
+
 ```bash
 uv run ruff check .
 uv run black --check .
@@ -599,7 +609,7 @@ Some AgentPM tools run on Node, some on Python—and your agent may need to spaw
 
 Why Docker?
 
-✅ Hermetic: Python + Node versions are pinned inside the image.
+✅ Both interpreters: Python and Node are available in the same image.
 
 ✅ No PATH drama: node/python are present and discoverable.
 
@@ -618,19 +628,30 @@ Why Docker?
 
 ### How to use it
 
-1. Copy the provided [Dockerfile](https://github.com/agentpm-dev/sdk-python/tree/main/examples/python-agent) into your repo.
+1. Copy the provided Dockerfile and `.dockerignore` from the [container scaffold](https://github.com/agentpm-dev/sdk-python/tree/main/examples/python-agent) into your repo.
 2. Install a compatible Linux AgentPM CLI in the image and check `agentpm --version`.
    The linked Dockerfiles are app scaffolds; add the CLI executable for your
-   container architecture to the build context and copy it onto PATH.
+   supported Linux x86-64 glibc target to the build context as `agentpm`; the
+   scaffold copies it onto PATH. The app dependency manifest must require SDK
+   0.1.17+. Supply the app source/build output referenced by its final command.
 3. Copy the authored manifest/portable `agent.lock`, then run `agentpm install`
    inside the image with its selected Python. Do not commit `.agentpm/` or copy
-   host-managed environments into a different platform/container.
+   host-managed environments into a different platform/container. For an app
+   that loads an installed Agent without a local manifest, change the scaffold
+   install command to `agentpm install @your-namespace/your-agent@1.0.0`. CLI 0.1.43 cannot
+   replay direct non-Tool package references with `--frozen`; use the exact
+   Agent reference and review the resulting lock rather than editing it.
 4. Build & run:
 
 ```bash
-docker build -t agent-app .
-docker run --rm -e OPENAI_API_KEY=$OPENAI_API_KEY agent-app
+docker build --platform linux/amd64 -t agent-app .
+docker run --rm --platform linux/amd64 -e OPENAI_API_KEY agent-app
 ```
+
+The released Linux CLI 0.1.43 needs glibc 2.39 or newer. These scaffolds use
+matching Debian Trixie bases and target Linux x86-64; a different Docker host
+needs its own container emulation support. This does not add a native Linux
+arm64 or musl CLI release.
 
 5. For development, use the docker-compose.yml snippet to mount your source and pass env vars conveniently.
 
@@ -638,12 +659,13 @@ docker run --rm -e OPENAI_API_KEY=$OPENAI_API_KEY agent-app
 
 - Set `AGENTPM_DEBUG=1` to print the SDK’s project root and package search paths. Environment values are not logged.
 - You can force interpreters via:
+
 ```ini
 AGENTPM_NODE=/usr/bin/node
-AGENTPM_PYTHON=/usr/local/bin/python3.11
+AGENTPM_PYTHON=/usr/local/bin/python3.13
 ```
 
-- Prefer absolute interpreters in agent.json.entrypoint.command for production (e.g., /usr/bin/node). The CLI enforces the Node/Python family and owns managed Python selection.
+- Use portable `node`/`python` entrypoint commands. Select host-specific executables with the CLI interpreter overrides; the CLI owns managed Python selection.
 
 ---
 
@@ -669,6 +691,32 @@ AGENTPM_PYTHON=/usr/local/bin/python3.11
 ## License
 
 MIT — see `LICENSE`.
+
+## Releases, locks and migration
+
+SDK **0.1.17+** reads supported v2/v3/v4 locks and delegates all Python and Node
+Tool calls to CLI **0.1.43+**. Older SDKs are not made compatible by upgrading
+only the CLI. An unsupported future lock version fails instead of being
+rewritten. Keep portable `agent.lock` in source control and local `.agentpm/`
+install/runtime state out of it.
+
+For new Python releases, lock integrity identifies the logical release, which
+binds every target artifact. CLI install chooses the exact consumer target
+before an `any` fallback and verifies provenance, archive bytes and locked Python
+wheels. Source-only Tools can use `any` even with native dependencies. Legacy
+Python/Node Tools keep their release semantics while using the same CLI bridge.
+
+Use `agentpm install` to update AgentPM package references/install state and
+`agentpm install --refresh` for damaged packages. Use the language package manager
+to upgrade this SDK. SDK calls do not install, rebuild or repair environments.
+Containers and CI jobs need the compatible CLI in addition to this package.
+
+See the public [Python dependency and migration guide](https://www.agentpackagemanager.com/docs/v0.1/advanced/python-dependencies),
+[release integrity](https://www.agentpackagemanager.com/docs/v0.1/advanced/release-integrity),
+[environment settings](https://www.agentpackagemanager.com/docs/v0.1/advanced/environment-variables)
+and [maintained examples](https://github.com/agentpm-dev/agentpm-examples).
+Minimal anonymous CLI telemetry is enabled by default; set `AGENTPM_TELEMETRY=0`
+for opt-out. See [privacy and feedback](https://www.agentpackagemanager.com/docs/v0.1/advanced/analytics-and-feedback).
 
 ## Contributor verification
 
