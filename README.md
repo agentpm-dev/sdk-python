@@ -653,6 +653,12 @@ matching Debian Trixie bases and target Linux x86-64; a different Docker host
 needs its own container emulation support. This does not add a native Linux
 arm64 or musl CLI release.
 
+Running amd64 images on Apple Silicon depends on Docker's emulator. Container
+verification encountered a TLS error under Rosetta and a verified uv 0.13.5
+startup crash under QEMU; both SDK container checks passed on native Linux
+x86-64. Use a native Linux build runner when emulation blocks installation.
+See [container emulation troubleshooting](https://www.agentpackagemanager.com/docs/v0.1/advanced/mixed-runtimes-with-docker#apple-silicon-and-amd64-emulation).
+
 5. For development, use the docker-compose.yml snippet to mount your source and pass env vars conveniently.
 
 ### Troubleshooting
