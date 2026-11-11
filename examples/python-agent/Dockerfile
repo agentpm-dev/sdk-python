@@ -1,32 +1,22 @@
-# ---- Stage 1: vendor Node 20
-FROM node:20-bullseye AS node20
+# App scaffold for supported Linux x86-64 (glibc).
+# Supply a checksum-verified CLI 0.1.43+ binary named agentpm in the build context.
+# The app pyproject.toml must require agentpm >=0.1.17.
+FROM node:22-trixie-slim AS node_runtime
+FROM python:3.13-slim-trixie AS runtime
 
-# ---- Stage 2: Python runtime
-FROM python:3.11-slim AS runtime
-
-# Use vendored Node 20 for all AgentPM tools
-COPY --from=node20 /usr/local/bin/node /opt/node20/bin/node
-RUN chmod +x /opt/node20/bin/node && /opt/node20/bin/node -v
-ENV AGENTPM_NODE=/opt/node20/bin/node
-
-# Normal app setup
+COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
+COPY --chmod=755 agentpm /usr/local/bin/agentpm
+ENV AGENTPM_PYTHON=/usr/local/bin/python3.13
 RUN useradd -m app
 USER app
 WORKDIR /app
 
-COPY --chown=app:app .agentpm /app/.agentpm
 COPY --chown=app:app pyproject.toml README.md ./
 COPY --chown=app:app src/ ./src/
-COPY --chown=app:app vendor/agentpm-*.whl /wheels/
-
-RUN python -m pip install --upgrade pip \
- && python -m pip install --no-cache-dir /wheels/agentpm-*.whl \
- && python -m pip install --no-cache-dir .
-
-COPY --chown=app:app .. .
-
-ENV AGENTPM_DEBUG=1
-#ENV AGENTPM_NODE_JITLESS=1
-#ENV AGENTPM_NODE_OLD_SPACE_MB=1024
-
+RUN python -m pip install --no-cache-dir .
+COPY --chown=app:app . .
+# Commit a portable agent.lock; provision for the image's target/interpreter.
+# Installed-Agent apps: replace install below with an exact package install.
+# CLI 0.1.43 direct non-Tool installs do not support --frozen; see the README.
+RUN agentpm --version && agentpm install --frozen
 CMD ["python", "run.py"]
