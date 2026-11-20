@@ -30,6 +30,12 @@ can be loaded from a project containing just `agent.lock` and `.agentpm`; no app
 `agent.json` is required. Exact locked references remain exact when other
 versions coexist. A local author Tool root is not an installed Agent.
 
+SDK 0.1.17 accepts the additive v4 `standard` and `standard_origin` fields.
+For locks containing these fields, use **CLI 0.1.47+** on developer machines,
+CI and container images. Older CLIs can report an `unknown field` error;
+upgrade the CLI instead of removing provenance. `legacy_inferred` records
+historical interpretation, not an authored declaration or conformance result.
+
 Calls follow **app → SDK → `agentpm run --machine` → Tool**. The SDK unwraps the
 CLI result and returns the Tool's original JSON data. A Tool's `ok: false` stays
 ordinary returned data; runner failures raise an exception. Interpreter, schema,
@@ -519,12 +525,16 @@ load_memory("@zack/profile-memory@0.1.0", memory_dir_override="/path/to/memory")
   "description": "Summarize long text.",
   "inputs": {
     "type": "object",
-    "properties": { "text": { "type": "string", "description": "Text to summarize" } },
+    "properties": {
+      "text": { "type": "string", "description": "Text to summarize" }
+    },
     "required": ["text"]
   },
   "outputs": {
     "type": "object",
-    "properties": { "summary": { "type": "string", "description": "Summarized text" } },
+    "properties": {
+      "summary": { "type": "string", "description": "Summarized text" }
+    },
     "required": ["summary"]
   },
   "entrypoint": {

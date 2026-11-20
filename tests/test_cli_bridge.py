@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,13 @@ from agentpm import _cli, load, load_agent, load_skill
 
 FIXTURES = Path(__file__).parent / "fixtures/sdk-v1"
 VECTORS = json.loads((FIXTURES / "compatibility.json").read_text())
+EXTENDED = deepcopy(next(v for v in VECTORS["valid"] if v["name"] == "v4"))
+EXTENDED["name"] = "v4-apds"
+for entries in (EXTENDED["lock"]["packages"], EXTENDED["lock"]["roots"]):
+    for entry in entries.values():
+        entry["standard"] = {"id": "agentpm", "version": "1.0.0"}
+        entry["standard_origin"] = "legacy_inferred"
+VECTORS["valid"].append(EXTENDED)
 
 
 @pytest.fixture
@@ -60,7 +68,7 @@ def test_public_callable_sends_exact_context_and_unwraps(
 ) -> None:
     project = tmp_path / "project with spaces"
     directory = write_tool(project)
-    (project / "agent.lock").write_text(json.dumps(VECTORS["valid"][2]["lock"]))
+    (project / "agent.lock").write_text(json.dumps(EXTENDED["lock"]))
     child = project / "nested"
     child.mkdir()
     monkeypatch.chdir(child)
