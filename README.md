@@ -233,9 +233,32 @@ harness.shutdown()
 print(result)
 ```
 
-`agent` is optional. When set, it is passed to `agentpm harness` as either an installed Agent package ref such as `@zack/support-agent@0.1.0` or a local manifest path such as `./agent.json`; when omitted, Harness uses its normal workspace discovery/default Agent selection. Register host services before starting a run. The SDK launches `agentpm harness --machine`, correlates request/response frames, streams Harness events, and routes host-service callbacks for model providers, embedding providers, Knowledge runtimes, hooks, and approvals.
+`agent` is optional. When set, it is passed to `agentpm harness` as either an installed Agent package ref such as `@zack/support-agent@0.1.0` or a local Agent name recorded in the workspace lock, such as `consumer-1`; when omitted, Harness uses its normal workspace discovery/default Agent selection. Register host services before starting a run. The SDK launches `agentpm harness --machine`, correlates request/response frames, streams Harness events, and routes host-service callbacks for model providers, embedding providers, Knowledge runtimes, hooks, and approvals.
 
 The convenience Hook helpers use contract-specific type hints. `on_before_model_request` may return `context_sections` and `provider_options`, `on_before_tool_selection` may return `candidate_ids`, `on_before_tool_call` may return replacement `arguments`, `on_before_knowledge_request` may shape the same package request options, and `on_after_knowledge_retrieval` may filter/reorder existing results or transform model-visible text while retaining result identity. Direct Memory hook helpers can shape authorized read requests or patch/reject authorized write content before runtime dispatch. A returned object must include `decision: "continue"` or `decision: "reject"`; returning `None` is treated as an explicit continue with no patch. There is no embedding Hook ID; use `register_embedding_provider` to host query embedding.
+
+Inspect APDS support separately from runtime readiness:
+
+```python
+info = harness.initialize()
+response = harness.preflight()
+report = response["report"]  # Current CLI response envelope is preserved.
+standards = harness.supported_standards()
+# [{"id": "agentpm", "version": "1.0.0"}] when advertised by the running CLI.
+print(info["preflight"], report, standards)
+harness.shutdown()
+```
+
+`initialize()["preflight"]` contains the definition/readiness report; `preflight()`
+retains the CLI's `{report, mcp_exports}` envelope. `supported_standards()` reads
+that existing response, also accepting older flat responses. It returns `None`
+when an older CLI omits the advertisement and `[]` for an explicitly empty list;
+it never infers support from the unchanged machine protocol version `1`.
+Definition status, Harness support and local readiness remain separate. Failed
+preflight can still be inspected; starting a Run remains blocked.
+Harness uses the selected Agent's exact locked Component versions. A selected
+graph with multiple versions of an actively named Component is reported as a
+Runner limitation rather than choosing an arbitrary installed version.
 
 Host capability advertisement is role-specific. `register_model_provider` automatically advertises the registry ID as `provider` plus semantic-action, structured-output, multimodal-input, and usage-reporting flags; pass model-specific overrides such as `model` or `context_window_tokens` when known. `register_embedding_provider` registers the `embed` provider contract and advertises supported embedding spaces. `register_knowledge_runtime` registers the `retrieve` runtime contract and advertises supported modes/features/package attestations. `register_host_provider` remains available for lower-level role-specific capability shapes. `on_approval` advertises approval support and optional cancellation support. After initialization, `host_service_registration(role, registry_id)` exposes the Harness registration result, including `active: false` and a reason when Harness rejects a registration.
 
