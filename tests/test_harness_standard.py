@@ -135,6 +135,8 @@ def test_exact_direct_and_inherited_versions_execute_with_loop_denial(
 
         client.register_model_provider("sdk-model", model)
         try:
+            initialized = client.initialize()
+            assert initialized["preflight"]["local_readiness"] == "ready", initialized["preflight"]
             result = client.run("Check exact versions.")
             assert result["status"] == "ended", result
             assert len(calls) == 3
