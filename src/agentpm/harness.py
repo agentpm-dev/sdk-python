@@ -12,6 +12,15 @@ from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, Required, TextIO, TypedDict, cast, overload
 
 JsonValue = str | int | float | bool | None | dict[str, Any] | list[Any]
+
+
+class HarnessSupportedStandard(TypedDict):
+    """Exact APDS identity advertised by the CLI, distinct from protocol version."""
+
+    id: str
+    version: str
+
+
 HarnessHookId = Literal[
     "before_model_request",
     "before_tool_selection",
@@ -695,7 +704,7 @@ class HarnessClient:
         """Create a Harness machine client.
 
         `agent` is passed to `agentpm harness` as the Agent selector. It may be
-        a local Agent manifest path, such as `./agent.json`, or an installed
+        a local Agent name from the workspace lock, such as `consumer-1`, or an installed
         Agent package ref, such as `@scope/name@1.2.3`. Leave it unset to use
         Harness workspace discovery/default Agent selection.
         """
@@ -756,6 +765,29 @@ class HarnessClient:
         if not isinstance(response, dict):
             raise RuntimeError("Harness preflight returned a non-object response")
         return response
+
+    def supported_standards(self) -> list[HarnessSupportedStandard] | None:
+        """None means unadvertised by the CLI; an empty list means no support."""
+        report = self.preflight()
+        report = report.get("report", report)
+        if not isinstance(report, dict):
+            raise HarnessProtocolError(
+                "invalid_standard_advertisement", "Harness preflight report must be an object"
+            )
+        if "supported_standards" not in report:
+            return None
+        standards = report["supported_standards"]
+        if not isinstance(standards, list) or not all(
+            isinstance(value, dict)
+            and isinstance(value.get("id"), str)
+            and isinstance(value.get("version"), str)
+            for value in standards
+        ):
+            raise HarnessProtocolError(
+                "invalid_standard_advertisement",
+                "Harness supported_standards must contain exact id/version objects",
+            )
+        return cast(list[HarnessSupportedStandard], standards)
 
     def run(self, input: str, **payload: JsonValue) -> dict[str, Any]:
         self._ensure_initialized()
