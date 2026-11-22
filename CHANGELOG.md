@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.18 — Unreleased
 
 - Expose exact Runner-advertised APDS identities through the existing Harness
   bridge: `supportedStandards()` (Node) / `supported_standards()` (Python).
